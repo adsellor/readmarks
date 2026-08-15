@@ -3,7 +3,6 @@ const document = @import("markix").document;
 const limits = @import("limits.zig");
 const model = @import("model.zig");
 
-const magic = "MARKRC04";
 const SaveOutcome = union(enum) { success, failure: anyerror };
 const SaveResultQueue = std.Io.Queue(SaveOutcome);
 const Paths = @import("data").Paths;
@@ -15,10 +14,6 @@ pub const Persistence = struct {
     directory_length: u16,
     file_path: [limits.path_bytes_max]u8 = undefined,
     file_path_length: u16,
-    /// The pre-XDG location. Read from once so an upgrade does not throw away
-    /// a warm cache and refetch every feed.
-    legacy_path: [limits.path_bytes_max]u8 = undefined,
-    legacy_path_length: u16,
     buffer: [limits.cache_bytes_max]u8 = undefined,
     save_task: std.Io.Group = .init,
     save_result_buffer: [1]SaveOutcome = undefined,
@@ -47,12 +42,6 @@ pub const Persistence = struct {
             .{ directory, file_name },
         );
         self.file_path_length = @intCast(path.len);
-        const legacy = try std.fmt.bufPrint(
-            &self.legacy_path,
-            "{s}/{s}",
-            .{ paths.legacy.bytes(), file_name },
-        );
-        self.legacy_path_length = @intCast(legacy.len);
     }
 
     pub fn deinit(self: *Persistence, io: std.Io) void {
@@ -104,10 +93,10 @@ pub const Persistence = struct {
         articles: *[limits.article_count_max]model.Article,
         article_count: *u16,
     ) !?i64 {
-        const current = try self.read(io, self.file_path[0..self.file_path_length]);
-        const bytes = current orelse
-            try self.read(io, self.legacy_path[0..self.legacy_path_length]) orelse
-            return null;
+        const bytes = try self.read(
+            io,
+            self.file_path[0..self.file_path_length],
+        ) orelse return null;
         if (bytes.len == self.buffer.len) return error.CacheFileTooLarge;
         return try decode(bytes, feeds, feed_count, articles, article_count);
     }
@@ -246,7 +235,6 @@ pub fn encode(
     if (feed_count > limits.feed_count_max) return error.InvalidCache;
     if (article_count > limits.article_count_max) return error.InvalidCache;
     var writer = std.Io.Writer.fixed(output);
-    try writer.writeAll(magic);
     try write_integer(i64, &writer, saved_at_seconds);
     try write_integer(u16, &writer, feed_count);
     var feed_index: u16 = 0;
@@ -282,9 +270,7 @@ pub fn decode(
     articles: *[limits.article_count_max]model.Article,
     article_count: *u16,
 ) !i64 {
-    if (input.len < magic.len + @sizeOf(i64)) return error.InvalidCache;
-    if (!std.mem.eql(u8, input[0..magic.len], magic)) return error.InvalidCache;
-    var cursor: usize = magic.len;
+    var cursor: usize = 0;
     const saved_at_seconds = try read_integer(i64, input, &cursor);
     var feed_map: [limits.feed_count_max]?u16 = @splat(null);
     const cached_feed_count = try read_integer(u16, input, &cursor);

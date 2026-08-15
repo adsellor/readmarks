@@ -24,8 +24,45 @@ const SearchInput = terminal.widgets.TextInput(limits.search_bytes_max);
 const FeedUrlInput = terminal.widgets.TextInput(limits.article_url_bytes_max);
 const FeedCategoryInput = terminal.widgets.TextInput(limits.category_name_bytes_max);
 
+const command_center = @import("../ui/command_center.zig");
+const command_policy = @import("../command.zig");
+
 pub const Focus = enum { categories, feeds, articles, reader };
 pub const Scope = enum { all, unread, category };
+
+/// What the command centre can run here. The bookmarker has its own list; what
+/// both share is that `:` reaches every action the experience has.
+pub const actions = @import("actions.zig");
+pub const CommandAction = actions.Index;
+const ArgumentText = FixedText(limits.article_url_bytes_max);
+
+pub const CommandResult = union(enum) {
+    action: CommandAction,
+    article: u16,
+    feed: u16,
+    category: u16,
+};
+
+pub const Commands = command_center.Center(
+    CommandResult,
+    limits.command_result_count_max,
+    limits.article_url_bytes_max,
+);
+
+/// Zen mode: the articles on their own, with the finder over them. Its state
+/// travels together so entering and leaving is one assignment.
+pub const Zen = struct {
+    active: bool = false,
+    finding: bool = false,
+
+    fn enter(self: *Zen) void {
+        self.* = .{ .active = true };
+    }
+
+    fn leave(self: *Zen) void {
+        self.* = .{};
+    }
+};
 
 const PaneGeometry = struct {
     /// The whole pane (chrome included), for hit-testing which pane a pointer
@@ -64,6 +101,7 @@ pub const Application = struct {
     fetch_in_progress: bool = false,
     fetch_busy_count: u16 = 0,
     fetch_next: u16 = 0,
+    fetch_start: u16 = 0,
     fetch_stop: u16 = 0,
     fetch_success_count: u16 = 0,
     fetch_failure_count: u16 = 0,
@@ -132,6 +170,17 @@ pub const Application = struct {
     feed_url_input: FeedUrlInput = .{},
     feed_category_input: FeedCategoryInput = .{},
     help_open: bool = false,
+    /// Persistent DOM view, kept across frames so node dirty flags mean
+    /// something.
+    dom_view: @import("dom_view.zig").View = .{},
+    /// The command centre, open over whatever the reader was showing. It knows
+    /// whether it is up, so there is no second flag here to keep in step.
+    command: Commands = .{},
+    active_action: ?CommandAction = null,
+    argument_index: u8 = 0,
+    argument_text: [actions.arguments_max]ArgumentText = @splat(.{}),
+    collected: [actions.arguments_max][]const u8 = @splat(&[_]u8{}),
+    zen: Zen = .{},
     message: Message = .{},
 
     pub fn create(
@@ -162,6 +211,7 @@ pub const Application = struct {
         self.fetch_in_progress = false;
         self.fetch_busy_count = 0;
         self.fetch_next = 0;
+        self.fetch_start = 0;
         self.fetch_stop = 0;
         self.fetch_success_count = 0;
         self.fetch_failure_count = 0;
@@ -212,6 +262,9 @@ pub const Application = struct {
         self.feed_url_input = .{};
         self.feed_category_input = .{};
         self.help_open = false;
+        self.command = .{};
+        self.active_action = null;
+        self.zen = .{};
         self.message = .{};
         if (backend == .web) self.fetch_transport = .{};
     }
@@ -342,6 +395,7 @@ pub const Application = struct {
 
     pub fn handle_key(self: *Application, key: layout.input.Key) !bool {
         if (self.help_open) return self.handle_help(key);
+        if (self.command.is_open()) return self.handle_command(key);
         switch (key) {
             .character => |byte| if (byte == '?') {
                 self.help_open = true;
@@ -351,6 +405,7 @@ pub const Application = struct {
             else => {},
         }
         if (self.feed_mode != .browse) return self.handle_feed_mode(key);
+        if (self.zen.finding) return self.handle_zen_search(key);
         if (self.search_open) return self.handle_search(key);
         return switch (key) {
             .character => |byte| self.handle_character(byte),
@@ -504,9 +559,245 @@ pub const Application = struct {
             .character => |byte| if (byte == '?' or byte == 'q') {
                 self.help_open = false;
             },
+            .control => |byte| if (byte == 'c') return false,
             else => {},
         }
         return true;
+    }
+
+    fn handle_command(self: *Application, key: layout.input.Key) !bool {
+        switch (try self.command.handle(key, command_policy.bindings)) {
+            .quit => return false,
+            .close => try self.cancel_command(),
+            .activate => try self.activate_command_result(),
+            .query_changed => self.refresh_command_results(),
+            .input_changed => try self.run_live_action(),
+            .submit => try self.submit_action(),
+            .consumed => {},
+        }
+        return true;
+    }
+
+    fn cancel_command(self: *Application) !void {
+        const live = if (self.active_argument()) |argument| argument.live else false;
+        self.command.close();
+        self.active_action = null;
+        if (live) {
+            self.applied_search.clear();
+            self.refresh_lists();
+            try self.set_message("Search cleared");
+        }
+    }
+
+    fn run_live_action(self: *Application) !void {
+        const action = self.active_action orelse return;
+        const argument = self.active_argument() orelse return;
+        if (!argument.live) return;
+        self.collected[self.argument_index] = self.command.query();
+        try actions.table[action].run(self, self.collected[0 .. self.argument_index + 1]);
+    }
+
+    fn submit_action(self: *Application) !void {
+        const action = self.active_action orelse return;
+        const argument = self.active_argument() orelse return;
+        try self.argument_text[self.argument_index].set(self.command.query());
+        self.collected[self.argument_index] = self.argument_text[self.argument_index].bytes();
+        if (argument.live) {
+            self.command.close();
+            self.active_action = null;
+            if (self.applied_search.value().len == 0) {
+                try self.set_message("Search cleared");
+            } else {
+                try self.set_message_formatted(
+                    "Searching {s} for \"{s}\"",
+                    .{ pane_name(self.search_scope), self.applied_search.value() },
+                );
+            }
+            return;
+        }
+        const list = actions.arguments(action);
+        if (self.argument_index + 1 < list.len) {
+            self.argument_index += 1;
+            self.command.collect();
+            return;
+        }
+        const count = self.argument_index + 1;
+        self.command.close();
+        self.active_action = null;
+        try actions.table[action].run(self, self.collected[0..count]);
+    }
+
+    fn begin_command(self: *Application) !void {
+        self.command.begin();
+        try self.close_reader();
+        self.refresh_command_results();
+    }
+
+    fn refresh_command_results(self: *Application) void {
+        self.command.reset_results();
+        const raw = self.command.query();
+        if (command_policy.action_query(raw)) |action_query| {
+            for (actions.table, 0..) |entry, index| {
+                if (self.command.count == Commands.result_capacity) break;
+                const value = command_center.rank(entry.label, action_query) orelse
+                    continue;
+                self.command.append(.{ .action = @intCast(index) }, value);
+            }
+            self.command.finish_results();
+            return;
+        }
+        const query = raw;
+        if (query.len == 0) {
+            self.command.finish_results();
+            return;
+        }
+        var article_index: u16 = 0;
+        while (article_index < self.article_count) : (article_index += 1) {
+            if (self.command.count == Commands.result_capacity) break;
+            // Its own title only. Matching an article against its feed's name
+            // listed every article of a matching feed beside the feed itself,
+            // which read as the same entry over and over.
+            const value = command_center.rank(
+                self.articles[article_index].title.bytes(),
+                query,
+            ) orelse continue;
+            self.command.append(.{ .article = article_index }, value);
+        }
+        var feed_index: u16 = 0;
+        while (feed_index < self.feed_count) : (feed_index += 1) {
+            if (self.command.count == Commands.result_capacity) break;
+            const value = command_center.rank(
+                self.feeds[feed_index].title.bytes(),
+                query,
+            ) orelse continue;
+            self.command.append(.{ .feed = feed_index }, value);
+        }
+        var category_index: u16 = 0;
+        while (category_index < self.category_count) : (category_index += 1) {
+            if (self.command.count == Commands.result_capacity) break;
+            const value = command_center.rank(
+                self.categories[category_index].bytes(),
+                query,
+            ) orelse continue;
+            self.command.append(.{ .category = category_index }, value);
+        }
+        self.command.finish_results();
+    }
+
+    fn activate_command_result(self: *Application) !void {
+        const result = self.command.selected_result() orelse {
+            self.command.close();
+            return;
+        };
+        self.command.close();
+        switch (result) {
+            .action => |action| try self.activate_command_action(action),
+            .article => |index| try self.select_command_article(index),
+            .feed => |index| {
+                self.select_scope(.all, "");
+                self.active_feed = index;
+                self.feed_cursor = index + 1;
+                self.focus = .feeds;
+                self.refresh_articles();
+                try self.set_message("Feed selected");
+            },
+            .category => |index| {
+                if (index >= self.category_count) return;
+                self.select_scope(.category, self.categories[index].bytes());
+                self.focus = .categories;
+                try self.set_message("Category selected");
+            },
+        }
+    }
+
+    fn activate_command_action(self: *Application, action: CommandAction) !void {
+        if (action >= actions.table.len) return;
+        const entry = actions.table[action];
+        if (entry.arguments.len == 0) {
+            self.command.close();
+            try entry.run(self, &.{});
+            return;
+        }
+        self.active_action = action;
+        self.argument_index = 0;
+        if (entry.begin) |hook| try hook(self);
+        self.command.collect();
+        try self.close_reader();
+    }
+
+    fn begin_action(self: *Application, action: CommandAction) !void {
+        self.command.begin();
+        try self.activate_command_action(action);
+    }
+
+    pub fn active_argument(self: *const Application) ?actions.Argument {
+        const action = self.active_action orelse return null;
+        const list = actions.arguments(action);
+        if (self.argument_index >= list.len) return null;
+        return list[self.argument_index];
+    }
+
+    pub fn active_label(self: *const Application) []const u8 {
+        const action = self.active_action orelse return "";
+        return actions.label(action);
+    }
+
+    fn select_command_article(self: *Application, article_index: u16) !void {
+        self.applied_search.clear();
+        self.select_scope(.all, "");
+        if (self.find_filtered_article(article_index)) |cursor| {
+            self.article_cursor = cursor;
+            self.focus = .articles;
+            self.reader_scroll = 0;
+            self.ensure_article_visible();
+            try self.set_message("Article selected");
+            return;
+        }
+        try self.set_message("Article is no longer available");
+    }
+
+    /// What a result reads as. The view asks rather than reaching into the
+    /// collections itself.
+    pub fn command_result_title(self: *Application, result: CommandResult) []const u8 {
+        return switch (result) {
+            .action => |action| command_action_label(action),
+            .article => |index| if (index < self.article_count)
+                self.articles[index].title.bytes()
+            else
+                "Unavailable article",
+            .feed => |index| if (index < self.feed_count)
+                self.feeds[index].title.bytes()
+            else
+                "Unavailable feed",
+            .category => |index| if (index < self.category_count)
+                self.categories[index].bytes()
+            else
+                "Unavailable category",
+        };
+    }
+
+    pub fn command_result_detail(self: *Application, result: CommandResult) []const u8 {
+        return switch (result) {
+            .action => |action| command_action_detail(action),
+            .article => |index| if (index < self.article_count)
+                self.feeds[self.articles[index].feed_index].title.bytes()
+            else
+                "",
+            .feed => |index| if (index < self.feed_count)
+                self.feeds[index].category.bytes()
+            else
+                "",
+            .category => "Scope the reader to this category",
+        };
+    }
+
+    pub fn command_result_marker(self: *Application, result: CommandResult) u8 {
+        _ = self;
+        return switch (result) {
+            .action => command_policy.marker.action,
+            .article => command_policy.marker.item,
+            .feed, .category => command_policy.marker.group,
+        };
     }
 
     fn handle_character(self: *Application, byte: u8) !bool {
@@ -518,16 +809,26 @@ pub const Application = struct {
             'l' => _ = try self.cycle_focus(1),
             'g' => _ = self.move_to_edge(false),
             'G' => _ = self.move_to_edge(true),
-            '/' => try self.begin_search(),
+            // Zen mode narrows through its own finder, which is the command
+            // centre's surface; everywhere else `/` searches the focused pane.
+            '/' => if (self.zen.active)
+                self.begin_zen_search()
+            else
+                try self.begin_action(actions.search),
+            ':' => try self.begin_command(),
+            'z' => try self.toggle_zen(),
             'o' => try self.open_selected(),
             'i' => try self.open_selected_image(),
             'b' => try self.bookmark_selected(),
             'm' => try self.toggle_read(),
-            'u' => self.select_scope(.unread, ""),
-            'a' => self.select_scope(.all, ""),
+            'M' => try self.mark_shown_read(),
+            // Scopes are `1` and `2` in both experiences, which frees `a` to
+            // mean "add" in both rather than "all" here and "add" there.
+            '1' => self.select_scope(.all, ""),
+            '2' => self.select_scope(.unread, ""),
             'r' => try self.start_refresh_selected(),
             'R' => try self.start_refresh_all(),
-            'A' => try self.begin_add_feed(),
+            'a', 'A' => try self.begin_action(actions.add_feed),
             'd' => try self.begin_remove_feed(),
             'P' => try self.begin_prune_feeds(),
             'c' => try self.toggle_focused_section(),
@@ -540,11 +841,86 @@ pub const Application = struct {
     fn handle_control(self: *Application, byte: u8) !bool {
         switch (byte) {
             'c' => return false,
-            'd' => self.move_page(1),
-            'u' => self.move_page(-1),
+            'f' => self.move_page(1),
+            'b' => self.move_page(-1),
+            'p' => try self.begin_command(),
             else => {},
         }
         return true;
+    }
+
+    fn begin_zen_search(self: *Application) void {
+        self.search.clear();
+        self.search_scope = .articles;
+        self.zen.finding = true;
+    }
+
+    /// The finder over zen mode narrows the article list in place, so it drives
+    /// the same selection the list behind it shows.
+    fn handle_zen_search(self: *Application, key: layout.input.Key) !bool {
+        switch (key) {
+            .escape => {
+                self.search.clear();
+                self.applied_search.clear();
+                self.zen.finding = false;
+                self.refresh_lists();
+                try self.set_message("Search cleared");
+                return true;
+            },
+            .enter => {
+                self.zen.finding = false;
+                try self.set_message("Filter applied");
+                return true;
+            },
+            .tab, .right => {
+                self.cycle_zen_scope(1);
+                return true;
+            },
+            .shift_tab, .left => {
+                self.cycle_zen_scope(-1);
+                return true;
+            },
+            .up => {
+                self.move_articles(-1);
+                return true;
+            },
+            .down => {
+                self.move_articles(1);
+                return true;
+            },
+            .control => |byte| {
+                if (byte == 'c') return false;
+                if (byte == 'p' or byte == 'k') self.move_articles(-1);
+                if (byte == 'n' or byte == 'j') self.move_articles(1);
+                return true;
+            },
+            else => {},
+        }
+        const action = try self.search.handle(key);
+        if (action == .changed) {
+            try self.applied_search.set(self.search.value());
+            self.refresh_lists();
+        }
+        return true;
+    }
+
+    fn cycle_zen_scope(self: *Application, delta: i16) void {
+        self.select_scope(if (self.scope == .unread) .all else .unread, "");
+        _ = delta;
+    }
+
+    /// Zen mode: the articles on their own. `z` leaves it again, and the
+    /// finder inside it is the same surface the bookmarker's zen mode uses.
+    fn toggle_zen(self: *Application) !void {
+        if (self.zen.active) {
+            self.zen.leave();
+            try self.set_message("Workspace restored");
+            return;
+        }
+        try self.close_reader();
+        self.zen.enter();
+        self.focus = .articles;
+        try self.set_message("Zen mode");
     }
 
     fn handle_feed_mode(self: *Application, key: layout.input.Key) !bool {
@@ -621,7 +997,7 @@ pub const Application = struct {
 
     /// The document is not a list, so a search started there narrows the
     /// articles behind it.
-    fn search_target(focus: Focus) Focus {
+    pub fn search_target(focus: Focus) Focus {
         return switch (focus) {
             .categories => .categories,
             .feeds => .feeds,
@@ -640,9 +1016,7 @@ pub const Application = struct {
                 return true;
             },
             .enter => {
-                try self.applied_search.set(self.search.value());
                 self.search_open = false;
-                self.refresh_lists();
                 if (self.applied_search.value().len == 0) {
                     try self.set_message("Search cleared");
                 } else {
@@ -669,14 +1043,20 @@ pub const Application = struct {
             },
             else => {},
         }
-        _ = try self.search.handle(key);
+        // The list narrows as the query is typed, the way the bookmarker's
+        // search does. Enter only dismisses the field; Esc still clears.
+        const action = try self.search.handle(key);
+        if (action == .changed) {
+            try self.applied_search.set(self.search.value());
+            self.refresh_lists();
+        }
         return true;
     }
 
     /// Rebuilds every list a query can narrow. All three rather than only the
     /// searched one, because applying a search to one pane has to release the
     /// pane the previous search was narrowing.
-    fn refresh_lists(self: *Application) void {
+    pub fn refresh_lists(self: *Application) void {
         self.refresh_categories();
         self.refresh_feeds();
         self.refresh_articles();
@@ -700,7 +1080,11 @@ pub const Application = struct {
     }
 
     fn handle_escape(self: *Application) !bool {
-        if (self.reader_only) try self.close_reader();
+        if (self.reader_only) {
+            try self.close_reader();
+            return true;
+        }
+        if (self.zen.active) try self.toggle_zen();
         return true;
     }
 
@@ -724,6 +1108,7 @@ pub const Application = struct {
             return image_changed or cache_changed;
         }
         var completed: [1]FetchResult = undefined;
+        var applied: u16 = 0;
         while (true) {
             const count = self.fetch_results.get(self.io, &completed, 0) catch |err| {
                 return switch (err) {
@@ -743,7 +1128,12 @@ pub const Application = struct {
             self.fetch_workers_busy[worker_index] = false;
             self.fetch_busy_count -= 1;
             self.apply_fetch_result(&completed[0]);
+            applied += 1;
         }
+        // A poll that drained nothing has nothing to show: rebuilding the
+        // lists and repainting on every one of them re-sorted every article
+        // twenty times a second for the whole of a refresh.
+        if (applied == 0) return image_changed or cache_changed;
         self.schedule_available_feeds() catch |err| {
             try self.set_message(@errorName(err));
         };
@@ -849,10 +1239,12 @@ pub const Application = struct {
     fn set_refresh_message(self: *Application) !void {
         if (self.fetch_next < self.fetch_stop or self.fetch_busy_count > 0) {
             var buffer: [96]u8 = undefined;
+            const done = self.fetch_success_count + self.fetch_failure_count;
+            const total = self.fetch_stop -| self.fetch_start;
             const value = try std.fmt.bufPrint(
                 &buffer,
                 "Refreshing {d}/{d} | {d} articles",
-                .{ self.fetch_next, self.fetch_stop, self.article_count },
+                .{ done, total, self.article_count },
             );
             try self.set_message(value);
         } else {
@@ -928,7 +1320,7 @@ pub const Application = struct {
         try self.set_message("Enter a feed URL, then press Enter");
     }
 
-    fn commit_add_feed(self: *Application) !void {
+    pub fn commit_add_feed(self: *Application) !void {
         const feed = subscriptions.make_feed(
             self.feed_url_input.value(),
             self.feed_category_input.value(),
@@ -985,7 +1377,7 @@ pub const Application = struct {
         try self.set_message("Feed removed");
     }
 
-    fn begin_prune_feeds(self: *Application) !void {
+    pub fn begin_prune_feeds(self: *Application) !void {
         if (self.fetch_in_progress) {
             try self.set_message("Wait for the current refresh before pruning feeds");
             return;
@@ -1032,7 +1424,7 @@ pub const Application = struct {
         try self.set_message(value);
     }
 
-    fn start_refresh_all(self: *Application) !void {
+    pub fn start_refresh_all(self: *Application) !void {
         if (self.fetch_in_progress) {
             try self.set_message("A feed refresh is already running");
             return;
@@ -1046,13 +1438,14 @@ pub const Application = struct {
             self.feeds[index].failed = false;
         }
         self.fetch_next = 0;
+        self.fetch_start = 0;
         self.fetch_stop = self.feed_count;
         self.fetch_success_count = 0;
         self.fetch_failure_count = 0;
         try self.schedule_available_feeds();
     }
 
-    fn start_refresh_selected(self: *Application) !void {
+    pub fn start_refresh_selected(self: *Application) !void {
         if (self.fetch_in_progress) {
             try self.set_message("A feed refresh is already running");
             return;
@@ -1066,6 +1459,7 @@ pub const Application = struct {
         self.feeds[feed_index].fetched = false;
         self.feeds[feed_index].failed = false;
         self.fetch_next = feed_index;
+        self.fetch_start = feed_index;
         self.fetch_stop = feed_index + 1;
         self.fetch_success_count = 0;
         self.fetch_failure_count = 0;
@@ -1117,7 +1511,7 @@ pub const Application = struct {
         self.fetch_busy_count += 1;
     }
 
-    fn bookmark_selected(self: *Application) !void {
+    pub fn bookmark_selected(self: *Application) !void {
         const article = self.selected_article() orelse {
             try self.set_message("Nothing selected");
             return;
@@ -1157,7 +1551,7 @@ pub const Application = struct {
         try self.set_message("Bookmarked");
     }
 
-    fn open_selected(self: *Application) !void {
+    pub fn open_selected(self: *Application) !void {
         const article = self.selected_article() orelse {
             try self.set_message("Nothing selected");
             return;
@@ -1181,7 +1575,7 @@ pub const Application = struct {
         try self.set_message("Opened article image");
     }
 
-    fn toggle_read(self: *Application) !void {
+    pub fn toggle_read(self: *Application) !void {
         const article = self.selected_article() orelse return;
         if (article.read) {
             article.read = false;
@@ -1194,6 +1588,49 @@ pub const Application = struct {
         self.refresh_feeds();
         self.refresh_articles();
         try self.set_message(if (article.read) "Marked read" else "Marked unread");
+    }
+
+    /// Marks everything the article list is currently showing as read.
+    ///
+    /// It follows the scope rather than the focused feed alone, so it means
+    /// "this feed" with a feed selected, "this category" inside one, and
+    /// "everything shown" otherwise -- whatever is on screen is what it
+    /// clears, which is the only reading of it that cannot surprise.
+    pub fn mark_shown_read(self: *Application) !void {
+        var marked: u16 = 0;
+        var full = false;
+        var index: u16 = 0;
+        while (index < self.filtered_article_count) : (index += 1) {
+            const article = &self.articles[self.filtered_articles[index]];
+            if (article.read) continue;
+            // The mark is recorded before the flag is set, so a state file
+            // that will not take another entry leaves the article unread
+            // rather than read-in-memory and unread on the next launch.
+            self.read_state.mark_read(article.url.bytes()) catch {
+                full = true;
+                break;
+            };
+            article.read = true;
+            marked += 1;
+        }
+        if (marked == 0) {
+            try self.set_message(if (full)
+                "No room left to record more read articles"
+            else
+                "Everything here is already read");
+            return;
+        }
+        try self.state_persistence.save(self.io, &self.read_state);
+        self.refresh_feeds();
+        self.refresh_articles();
+        if (full) {
+            try self.set_message_formatted(
+                "Marked {d} read; no room left to record the rest",
+                .{marked},
+            );
+            return;
+        }
+        try self.set_message_formatted("Marked {d} articles read", .{marked});
     }
 
     fn mark_selected_read(self: *Application) !void {
@@ -1331,7 +1768,7 @@ pub const Application = struct {
         self.refresh_articles();
     }
 
-    fn rebuild_categories(self: *Application) void {
+    pub fn rebuild_categories(self: *Application) void {
         self.category_count = 0;
         var feed_index: u16 = 0;
         while (feed_index < self.feed_count) : (feed_index += 1) {
@@ -1499,7 +1936,7 @@ pub const Application = struct {
         );
     }
 
-    fn select_scope(self: *Application, scope: Scope, category: []const u8) void {
+    pub fn select_scope(self: *Application, scope: Scope, category: []const u8) void {
         self.scope = scope;
         self.active_category.clear();
         if (scope == .category) {
@@ -1577,7 +2014,7 @@ pub const Application = struct {
 
     /// Reads the selected article in the application rather than the browser,
     /// which is what `o` is for.
-    fn read_selected(self: *Application) !void {
+    pub fn read_selected(self: *Application) !void {
         if (self.selected_article() == null) {
             try self.set_message("Nothing selected");
             return;
@@ -1739,11 +2176,11 @@ pub const Application = struct {
         ensure_visible(self.article_cursor, &self.article_scroll, self.article_viewport);
     }
 
-    fn set_message(self: *Application, value: []const u8) !void {
+    pub fn set_message(self: *Application, value: []const u8) !void {
         try self.message.set(value);
     }
 
-    fn set_message_formatted(
+    pub fn set_message_formatted(
         self: *Application,
         comptime format: []const u8,
         arguments: anytype,
@@ -1755,6 +2192,14 @@ pub const Application = struct {
         try self.message.set(value);
     }
 };
+
+pub fn command_action_label(action: CommandAction) []const u8 {
+    return actions.label(action);
+}
+
+pub fn command_action_detail(action: CommandAction) []const u8 {
+    return actions.detail(action);
+}
 
 fn move_index(index: u16, count: u16, delta: i16) u16 {
     if (count == 0) return 0;

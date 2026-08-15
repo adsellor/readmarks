@@ -8,6 +8,10 @@ test {
     _ = @import("reader/view.zig");
     _ = @import("bookmarker/application.zig");
     _ = @import("bookmarker/view.zig");
+    _ = @import("theme.zig");
+    _ = @import("ui.zig");
+    _ = @import("keymap.zig");
+    _ = @import("command.zig");
     _ = @import("data");
     _ = @import("web_main.zig");
 }

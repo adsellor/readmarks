@@ -45,7 +45,7 @@ pub const Application = struct {
     }
 
     pub fn handle_key(self: *Application, key: layout.input.Key) !bool {
-        if (key == .control and key.control == 'b') {
+        if (key == .control and key.control == 'u') {
             try self.switch_experience();
             return true;
         }
@@ -66,10 +66,11 @@ pub const Application = struct {
             .reader => .bookmarker,
             .bookmarker => .reader,
         };
-        // Both experiences share one canvas and the reader repaints all of it.
-        // The bookmarker paints incrementally against what it last drew, so it
-        // has to be told that surface is gone.
+        // Both experiences share one canvas and both paint incrementally
+        // against what they last drew, so each has to be told its surface is
+        // gone when the other takes the canvas over.
         self.bookmarker.dom_view.invalidate_surface();
+        self.reader.dom_view.invalidate_surface();
         if (self.experience == .bookmarker) {
             try self.bookmarker.load();
         }
@@ -96,7 +97,7 @@ test "merged application switches experiences and renders both" {
     try view.render(application, &reader_canvas);
     try std.testing.expect(application.experience == .reader);
 
-    _ = try application.handle_key(.{ .control = 'b' });
+    _ = try application.handle_key(.{ .control = 'u' });
     try std.testing.expect(application.experience == .bookmarker);
     var bookmarker_canvas = try terminal.TerminalCanvas.init(
         std.testing.allocator,
@@ -106,7 +107,7 @@ test "merged application switches experiences and renders both" {
     defer bookmarker_canvas.deinit();
     try view.render(application, &bookmarker_canvas);
 
-    _ = try application.handle_key(.{ .control = 'b' });
+    _ = try application.handle_key(.{ .control = 'u' });
     try std.testing.expect(application.experience == .reader);
     var reader_canvas_again = try terminal.TerminalCanvas.init(
         std.testing.allocator,
@@ -115,4 +116,48 @@ test "merged application switches experiences and renders both" {
     );
     defer reader_canvas_again.deinit();
     try view.render(application, &reader_canvas_again);
+}
+
+test "switching experiences repaints whichever one takes the canvas" {
+    const terminal = @import("markix").terminal;
+    const view = @import("view.zig");
+
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    defer application.destroy(std.testing.allocator);
+    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
+    defer canvas.deinit();
+
+    try view.render(application, &canvas);
+    canvas.commit_frame();
+
+    try view.render(application, &canvas);
+    try std.testing.expectEqual(@as(u16, 0), application.reader.dom_view.last_painted);
+    canvas.commit_frame();
+
+    _ = try application.handle_key(.{ .control = 'u' });
+    try view.render(application, &canvas);
+    try std.testing.expect(application.bookmarker.dom_view.last_painted > 0);
+    canvas.commit_frame();
+
+    _ = try application.handle_key(.{ .control = 'u' });
+    try view.render(application, &canvas);
+    try std.testing.expect(application.reader.dom_view.last_painted > 0);
+}
+
+test "ctrl-u switches, and paging moved off it" {
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    defer application.destroy(std.testing.allocator);
+
+    _ = try application.handle_key(.{ .control = 'u' });
+    try std.testing.expect(application.experience == .bookmarker);
+    _ = try application.handle_key(.{ .control = 'u' });
+    try std.testing.expect(application.experience == .reader);
 }

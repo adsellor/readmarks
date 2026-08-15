@@ -23,6 +23,9 @@ pub const published_bytes_max: u16 = 48;
 pub const read_count_max: u16 = 8_192;
 pub const search_bytes_max: u16 = 128;
 pub const state_bytes_max: u32 = 128 * 1_024;
+pub const command_action_count_max: u16 = 16;
+pub const command_result_count_max: u16 =
+    article_count_max + feed_count_max + category_count_max + command_action_count_max;
 
 comptime {
     std.debug.assert(article_count_max > feed_articles_per_update_max);
@@ -41,4 +44,6 @@ comptime {
     std.debug.assert(article_page_response_bytes_max > feed_response_bytes_max);
     std.debug.assert(image_cache_slots_max > feed_fetch_concurrency);
     std.debug.assert(read_count_max > article_count_max);
+    std.debug.assert(command_action_count_max > 0);
+    std.debug.assert(command_result_count_max > article_count_max);
 }

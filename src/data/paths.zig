@@ -7,11 +7,6 @@ pub const Path = FixedText(limits.path_bytes_max);
 /// Directory the application owns inside each base directory.
 pub const application_directory = "readmarks";
 
-/// Where the application kept everything before it followed the base directory
-/// specification. Read from when the new location holds nothing yet, so an
-/// upgrade keeps its bookmarks and read marks; never written to.
-pub const legacy_directory = ".markix";
-
 pub const Environment = struct {
     home: []const u8,
     config_home: ?[]const u8 = null,
@@ -31,7 +26,6 @@ pub const Paths = struct {
     config: Path,
     data: Path,
     cache: Path,
-    legacy: Path,
 
     pub fn resolve(environment: Environment) !Paths {
         return .{
@@ -50,7 +44,6 @@ pub const Paths = struct {
                 environment.home,
                 ".cache",
             ),
-            .legacy = try join_path(environment.home, legacy_directory),
         };
     }
 
@@ -124,8 +117,6 @@ test "unset and empty variables fall back to the specified defaults" {
         "/home/reader/.cache/readmarks",
         unset.cache.bytes(),
     );
-    try std.testing.expectEqualStrings("/home/reader/.markix", unset.legacy.bytes());
-
     const empty = try Paths.resolve(.{ .home = "/home/reader", .cache_home = "" });
     try std.testing.expectEqualStrings(
         "/home/reader/.cache/readmarks",

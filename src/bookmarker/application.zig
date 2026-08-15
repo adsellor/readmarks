@@ -9,12 +9,14 @@ const Paths = @import("data").Paths;
 const page = @import("data").page;
 const Rect = layout.Rect;
 
+const command_center = @import("../ui/command_center.zig");
+const command_policy = @import("../command.zig");
+
 const SearchInput = terminal.widgets.TextInput(limits.search_bytes_max);
 const TitleInput = terminal.widgets.TextInput(limits.bookmark_title_bytes_max);
 const UrlInput = terminal.widgets.TextInput(limits.bookmark_url_bytes_max);
 const TagsInput = terminal.widgets.TextInput(limits.bookmark_tags_bytes_max);
 const NotesInput = terminal.widgets.TextInput(limits.bookmark_notes_bytes_max);
-const CommandInput = terminal.widgets.TextInput(limits.search_bytes_max);
 const Message = FixedText(160);
 const PageUrl = FixedText(limits.bookmark_url_bytes_max);
 pub const Tag = FixedText(limits.tag_name_bytes_max);
@@ -23,19 +25,22 @@ pub const Mode = enum { browse, search, add, confirm_delete, command, focus };
 pub const Field = enum { title, url, tags, notes };
 pub const BrowserFocus = enum { scopes, bookmarks, preview };
 pub const ScopeKind = enum { all, favorites, tag };
-pub const CommandAction = enum {
-    add,
-    open,
-    toggle_favorite,
-    refresh,
-    browse_all,
-    browse_favorites,
-};
+pub const actions = @import("actions.zig");
+pub const CommandAction = actions.Index;
+const ArgumentText = FixedText(limits.bookmark_url_bytes_max);
 pub const CommandResult = union(enum) {
     action: CommandAction,
     bookmark: u16,
     tag: u16,
 };
+
+/// The command centre over this experience's actions, bookmarks and tags.
+/// TODO: Standardize teh actions.
+pub const Commands = command_center.Center(
+    CommandResult,
+    limits.command_result_count_max,
+    limits.bookmark_url_bytes_max,
+);
 pub const MouseListRegion = struct {
     rect: Rect,
     scroll: u16,
@@ -108,13 +113,13 @@ pub const Application = struct {
     preview_viewport_rows: u16 = 1,
     narrow_preview: bool = false,
     focus_search_open: bool = false,
+    help_open: bool = false,
     search: SearchInput = .{},
-    command: CommandInput = .{},
-    command_results: [limits.command_result_count_max]CommandResult = undefined,
-    command_result_count: u16 = 0,
-    command_selected: u16 = 0,
-    command_scroll: u16 = 0,
-    command_viewport_rows: u16 = 1,
+    command: Commands = .{},
+    active_action: ?CommandAction = null,
+    argument_index: u8 = 0,
+    argument_text: [actions.arguments_max]ArgumentText = @splat(.{}),
+    collected: [actions.arguments_max][]const u8 = @splat(&[_]u8{}),
     title: TitleInput = .{},
     url: UrlInput = .{},
     tags: TagsInput = .{},
@@ -151,9 +156,24 @@ pub const Application = struct {
     }
 
     pub fn load(self: *Application) !void {
-        try self.persistence.load(self.io, &self.store);
+        // A store that will not decode is reported and left empty rather than
+        // failing the launch. Refusing to start is the one response that gives
+        // the reader no way to see what happened or to carry on with the rest
+        // of the application, and the file on disk is untouched until a save.
+        var failure: ?anyerror = null;
+        self.persistence.load(self.io, &self.store) catch |err| {
+            self.store = .{};
+            failure = err;
+        };
         self.rebuild_tags();
         self.refresh_filter();
+        if (failure) |err| {
+            try self.set_message_formatted(
+                "{s}: bookmarks could not be read; adding one will overwrite the file",
+                .{@errorName(err)},
+            );
+            return;
+        }
         if (self.store.count == 0) {
             try self.set_message("No bookmarks yet. Press a to add one.");
         } else {
@@ -166,6 +186,7 @@ pub const Application = struct {
             .pointer => |pointer| return self.handle_pointer(pointer),
             else => {},
         }
+        if (self.help_open) return self.handle_help(key);
         return switch (self.mode) {
             .browse => self.handle_browse(key),
             .search => self.handle_search(key),
@@ -174,6 +195,18 @@ pub const Application = struct {
             .command => self.handle_command(key),
             .focus => self.handle_focus(key),
         };
+    }
+
+    fn handle_help(self: *Application, key: layout.input.Key) bool {
+        switch (key) {
+            .escape => self.help_open = false,
+            .character => |byte| if (byte == '?' or byte == 'q') {
+                self.help_open = false;
+            },
+            .control => |byte| if (byte == 'c') return false,
+            else => {},
+        }
+        return true;
     }
 
     fn handle_pointer(
@@ -233,7 +266,7 @@ pub const Application = struct {
             return true;
         }
         if (region_contains(self.mouse_layout.command_results, pointer.x, pointer.y)) {
-            self.move_command_selection(delta);
+            self.command.move(delta);
             return true;
         }
         if (region_contains(self.mouse_layout.scopes, pointer.x, pointer.y)) {
@@ -289,9 +322,9 @@ pub const Application = struct {
         if (!contains(region.rect, pointer.x, pointer.y)) return false;
         const result_index = list_index(region, pointer.x, pointer.y) orelse
             return true;
-        if (result_index < self.command_result_count) {
-            self.command_selected = result_index;
-            self.ensure_command_visible();
+        if (result_index < self.command.count) {
+            self.command.selected = result_index;
+            self.command.set_viewport_rows(self.command.viewport);
         }
         return true;
     }
@@ -397,8 +430,8 @@ pub const Application = struct {
                 'l' => self.focus_right(),
                 'g' => self.select_first(),
                 'G' => self.select_last(),
-                'a' => self.begin_add(),
-                '/' => self.mode = .search,
+                'a' => try self.begin_action(actions.add),
+                '/' => try self.begin_action(actions.search),
                 'o' => try self.open_selected(),
                 'f' => try self.toggle_favorite(),
                 'r' => try self.refresh_selected_page(),
@@ -408,6 +441,7 @@ pub const Application = struct {
                 'v' => self.narrow_preview = !self.narrow_preview,
                 ':' => self.begin_command(),
                 'z' => try self.begin_focus(),
+                '?' => self.help_open = true,
                 else => {},
             },
             .enter => try self.activate_focused(),
@@ -418,8 +452,8 @@ pub const Application = struct {
             .end => self.select_last(),
             .control => |byte| switch (byte) {
                 'c' => return false,
-                'd' => self.move_page(1),
-                'u' => self.move_page(-1),
+                'f' => self.move_page(1),
+                'b' => self.move_page(-1),
                 'p' => self.begin_command(),
                 else => {},
             },
@@ -433,7 +467,12 @@ pub const Application = struct {
         switch (key) {
             .escape => try self.leave_focus(),
             .character => |byte| switch (byte) {
-                'q', 'z' => try self.leave_focus(),
+                // `q` quits from everywhere, as the help sheet says; `z` and
+                // Esc are what leave zen mode.
+                'q' => return false,
+                'z' => try self.leave_focus(),
+                '?' => self.help_open = true,
+                ':' => self.begin_command(),
                 '/' => try self.begin_focus_search(),
                 'j' => self.move_selection(1),
                 'k' => self.move_selection(-1),
@@ -451,8 +490,9 @@ pub const Application = struct {
             .end => self.select_last(),
             .control => |byte| switch (byte) {
                 'c' => return false,
-                'd' => self.move_page(1),
-                'u' => self.move_page(-1),
+                'f' => self.move_page(1),
+                'b' => self.move_page(-1),
+                'p' => self.begin_command(),
                 else => {},
             },
             else => {},
@@ -466,12 +506,12 @@ pub const Application = struct {
                 self.search.clear();
                 self.focus_search_open = false;
                 self.refresh_filter();
-                try self.set_message("Focus search cleared");
+                try self.set_message("Search cleared");
                 return true;
             },
             .enter => {
                 self.focus_search_open = false;
-                try self.set_message("Focus filter applied");
+                try self.set_message("Filter applied");
                 return true;
             },
             .tab, .right => {
@@ -509,37 +549,15 @@ pub const Application = struct {
     }
 
     fn handle_command(self: *Application, key: layout.input.Key) !bool {
-        switch (key) {
-            .escape => {
-                self.close_command();
-                return true;
-            },
-            .enter => {
-                try self.activate_command_result();
-                return true;
-            },
-            .up, .shift_tab => {
-                self.move_command_selection(-1);
-                return true;
-            },
-            .down, .tab => {
-                self.move_command_selection(1);
-                return true;
-            },
-            .control => |byte| {
-                if (byte == 'k' or byte == 'p') {
-                    self.move_command_selection(-1);
-                    return true;
-                }
-                if (byte == 'j' or byte == 'n') {
-                    self.move_command_selection(1);
-                    return true;
-                }
-            },
-            else => {},
+        switch (try self.command.handle(key, command_policy.bindings)) {
+            .quit => return false,
+            .close => try self.cancel_command(),
+            .activate => try self.activate_command_result(),
+            .query_changed => self.refresh_command_results(),
+            .input_changed => try self.run_live_action(),
+            .submit => try self.submit_action(),
+            .consumed => {},
         }
-        const action = try self.command.handle(key);
-        if (action == .changed) self.refresh_command_results();
         return true;
     }
 
@@ -613,7 +631,7 @@ pub const Application = struct {
         };
     }
 
-    fn begin_add(self: *Application) void {
+    pub fn begin_add(self: *Application) void {
         self.title.clear();
         self.url.clear();
         self.tags.clear();
@@ -623,9 +641,7 @@ pub const Application = struct {
     }
 
     fn begin_command(self: *Application) void {
-        self.command.clear();
-        self.command_selected = 0;
-        self.command_scroll = 0;
+        self.command.begin();
         self.mode = .command;
         self.refresh_command_results();
     }
@@ -635,7 +651,7 @@ pub const Application = struct {
         self.browser_focus = .bookmarks;
         self.focus_search_open = false;
         self.refresh_filter();
-        try self.set_message("Focus mode");
+        try self.set_message("Zen mode");
     }
 
     fn leave_focus(self: *Application) !void {
@@ -647,18 +663,16 @@ pub const Application = struct {
 
     fn begin_focus_search(self: *Application) !void {
         self.focus_search_open = true;
-        try self.set_message("Search and cycle categories");
+        try self.set_message("Find within the library");
     }
 
     fn close_command(self: *Application) void {
-        self.command.clear();
-        self.command_result_count = 0;
-        self.command_selected = 0;
-        self.command_scroll = 0;
+        self.command.close();
+        self.active_action = null;
         self.mode = .browse;
     }
 
-    fn submit_add(self: *Application) !void {
+    pub fn submit_add(self: *Application) !void {
         const bookmark = bookmarks.Bookmark.init(
             self.title.value(),
             self.url.value(),
@@ -685,7 +699,7 @@ pub const Application = struct {
         }
     }
 
-    fn open_selected(self: *Application) !void {
+    pub fn open_selected(self: *Application) !void {
         const bookmark = self.selected_bookmark() orelse {
             try self.set_message("Nothing selected");
             return;
@@ -696,7 +710,7 @@ pub const Application = struct {
         try self.set_message("Opened in browser");
     }
 
-    fn toggle_favorite(self: *Application) !void {
+    pub fn toggle_favorite(self: *Application) !void {
         const bookmark = self.selected_bookmark() orelse return;
         bookmark.favorite = !bookmark.favorite;
         try self.persistence.save(self.io, &self.store);
@@ -704,7 +718,7 @@ pub const Application = struct {
         try self.set_message(if (bookmark.favorite) "Favorited" else "Favorite removed");
     }
 
-    fn refresh_selected_page(self: *Application) !void {
+    pub fn refresh_selected_page(self: *Application) !void {
         if (self.selected >= self.filtered_count) return;
         try self.begin_page_fetch(self.filtered[self.selected]);
     }
@@ -764,8 +778,7 @@ pub const Application = struct {
     }
 
     pub fn set_command_viewport_rows(self: *Application, rows: u16) void {
-        self.command_viewport_rows = @max(rows, 1);
-        self.ensure_command_visible();
+        self.command.set_viewport_rows(rows);
     }
 
     /// What a result reads as. The view asks rather than reaching into the
@@ -796,68 +809,61 @@ pub const Application = struct {
         };
     }
 
+    pub fn command_result_marker(self: *Application, result: CommandResult) u8 {
+        _ = self;
+        return switch (result) {
+            .action => command_policy.marker.action,
+            .bookmark => command_policy.marker.item,
+            .tag => command_policy.marker.group,
+        };
+    }
+
     fn refresh_command_results(self: *Application) void {
-        self.command_result_count = 0;
-        const query = self.command.value();
-        const actions = std.enums.values(CommandAction);
-        for (actions) |action| {
-            if (layout.fuzzy.matches(command_action_label(action), query)) {
-                self.append_command_result(.{ .action = action });
+        self.command.reset_results();
+        const raw = self.command.query();
+        if (command_policy.action_query(raw)) |action_query| {
+            for (actions.table, 0..) |entry, index| {
+                if (self.command.count == Commands.result_capacity) break;
+                const value = command_center.rank(entry.label, action_query) orelse
+                    continue;
+                self.command.append(.{ .action = @intCast(index) }, value);
             }
+            self.command.finish_results();
+            return;
+        }
+        const query = raw;
+        if (query.len == 0) {
+            self.command.finish_results();
+            return;
         }
         var bookmark_index: u16 = 0;
         while (bookmark_index < self.store.count) : (bookmark_index += 1) {
+            if (self.command.count == Commands.result_capacity) break;
             const bookmark = &self.store.items[bookmark_index];
-            if (bookmark_matches_command(bookmark, query)) {
-                self.append_command_result(.{ .bookmark = bookmark_index });
-            }
+            const value = command_center.rank_any(&.{
+                bookmark.title.bytes(),
+                bookmark.host(),
+                bookmark.tags.bytes(),
+            }, query) orelse continue;
+            self.command.append(.{ .bookmark = bookmark_index }, value);
         }
         var tag_index: u16 = 0;
         while (tag_index < self.tag_count) : (tag_index += 1) {
-            if (layout.fuzzy.matches(self.tags_available[tag_index].bytes(), query)) {
-                self.append_command_result(.{ .tag = tag_index });
-            }
+            if (self.command.count == Commands.result_capacity) break;
+            const value = command_center.rank(
+                self.tags_available[tag_index].bytes(),
+                query,
+            ) orelse continue;
+            self.command.append(.{ .tag = tag_index }, value);
         }
-        if (self.command_result_count == 0) {
-            self.command_selected = 0;
-            self.command_scroll = 0;
-        } else if (self.command_selected >= self.command_result_count) {
-            self.command_selected = self.command_result_count - 1;
-        }
-        self.ensure_command_visible();
-    }
-
-    fn append_command_result(self: *Application, result: CommandResult) void {
-        std.debug.assert(self.command_result_count < limits.command_result_count_max);
-        self.command_results[self.command_result_count] = result;
-        self.command_result_count += 1;
-    }
-
-    fn move_command_selection(self: *Application, delta: i16) void {
-        if (self.command_result_count == 0) return;
-        const next = @as(i32, self.command_selected) + delta;
-        self.command_selected = @intCast(std.math.clamp(
-            next,
-            0,
-            @as(i32, self.command_result_count) - 1,
-        ));
-        self.ensure_command_visible();
-    }
-
-    fn ensure_command_visible(self: *Application) void {
-        if (self.command_selected < self.command_scroll) {
-            self.command_scroll = self.command_selected;
-        }
-        const visible_end = @as(u32, self.command_scroll) + self.command_viewport_rows;
-        if (self.command_selected >= visible_end) {
-            self.command_scroll =
-                self.command_selected - self.command_viewport_rows + 1;
-        }
+        self.command.finish_results();
     }
 
     fn activate_command_result(self: *Application) !void {
-        if (self.command_selected >= self.command_result_count) return;
-        const result = self.command_results[self.command_selected];
+        const result = self.command.selected_result() orelse {
+            self.close_command();
+            return;
+        };
         self.close_command();
         switch (result) {
             .action => |action| try self.activate_command_action(action),
@@ -877,22 +883,75 @@ pub const Application = struct {
         self: *Application,
         action: CommandAction,
     ) !void {
-        switch (action) {
-            .add => self.begin_add(),
-            .open => try self.open_selected(),
-            .toggle_favorite => try self.toggle_favorite(),
-            .refresh => try self.refresh_selected_page(),
-            .browse_all => {
-                self.search.clear();
-                self.select_scope(.all, "");
-                try self.set_message("Showing all bookmarks");
-            },
-            .browse_favorites => {
-                self.search.clear();
-                self.select_scope(.favorites, "");
-                try self.set_message("Showing favorites");
-            },
+        if (action >= actions.table.len) return;
+        const entry = actions.table[action];
+        if (entry.arguments.len == 0) {
+            self.close_command();
+            try entry.run(self, &.{});
+            return;
         }
+        self.active_action = action;
+        self.argument_index = 0;
+        self.mode = .command;
+        if (entry.begin) |hook| try hook(self);
+        self.command.collect();
+    }
+
+    fn begin_action(self: *Application, action: CommandAction) !void {
+        self.command.begin();
+        self.mode = .command;
+        try self.activate_command_action(action);
+    }
+
+    pub fn active_argument(self: *const Application) ?actions.Argument {
+        const action = self.active_action orelse return null;
+        const list = actions.arguments(action);
+        if (self.argument_index >= list.len) return null;
+        return list[self.argument_index];
+    }
+
+    pub fn active_label(self: *const Application) []const u8 {
+        const action = self.active_action orelse return "";
+        return actions.label(action);
+    }
+
+    fn cancel_command(self: *Application) !void {
+        const live = if (self.active_argument()) |argument| argument.live else false;
+        self.close_command();
+        if (live) {
+            self.search.clear();
+            self.refresh_filter();
+            try self.set_message("Search cleared");
+        }
+    }
+
+    fn run_live_action(self: *Application) !void {
+        const action = self.active_action orelse return;
+        const argument = self.active_argument() orelse return;
+        if (!argument.live) return;
+        self.collected[self.argument_index] = self.command.query();
+        try actions.table[action].run(self, self.collected[0 .. self.argument_index + 1]);
+    }
+
+    fn submit_action(self: *Application) !void {
+        const action = self.active_action orelse return;
+        const argument = self.active_argument() orelse return;
+        try self.argument_text[self.argument_index].set(self.command.query());
+        self.collected[self.argument_index] = self.argument_text[self.argument_index].bytes();
+        if (argument.live) {
+            self.close_command();
+            try self.set_message("Filter applied");
+            return;
+        }
+        const list = actions.arguments(action);
+        if (self.argument_index + 1 < list.len) {
+            self.argument_index += 1;
+            self.command.collect();
+            return;
+        }
+        const count = self.argument_index + 1;
+        self.close_command();
+        try actions.table[action].run(self, self.collected[0..count]);
     }
 
     fn select_command_bookmark(
@@ -913,7 +972,7 @@ pub const Application = struct {
         try self.set_message("Bookmark is no longer available");
     }
 
-    fn delete_selected(self: *Application) !void {
+    pub fn delete_selected(self: *Application) !void {
         if (self.selected >= self.filtered_count) return;
         try self.store.remove(self.filtered[self.selected]);
         try self.persistence.save(self.io, &self.store);
@@ -923,7 +982,7 @@ pub const Application = struct {
         try self.set_message("Bookmark deleted");
     }
 
-    fn refresh_filter(self: *Application) void {
+    pub fn refresh_filter(self: *Application) void {
         self.filtered_count = 0;
         var index: u16 = 0;
         while (index < self.store.count) : (index += 1) {
@@ -988,7 +1047,7 @@ pub const Application = struct {
         return false;
     }
 
-    fn select_scope(self: *Application, kind: ScopeKind, tag: []const u8) void {
+    pub fn select_scope(self: *Application, kind: ScopeKind, tag: []const u8) void {
         self.scope_kind = kind;
         if (kind == .tag) {
             self.active_tag.set(tag) catch unreachable;
@@ -1149,7 +1208,19 @@ pub const Application = struct {
         };
     }
 
-    fn set_message(self: *Application, value: []const u8) !void {
+    pub fn set_message(self: *Application, value: []const u8) !void {
+        try self.message.set(value);
+    }
+
+    fn set_message_formatted(
+        self: *Application,
+        comptime format: []const u8,
+        arguments: anytype,
+    ) !void {
+        var buffer: [Message.capacity_bytes]u8 = undefined;
+        // A message that does not fit is truncated: it is a hint on a status
+        // line, not something to fail over.
+        const value = std.fmt.bufPrint(&buffer, format, arguments) catch &buffer;
         try self.message.set(value);
     }
 };
@@ -1210,25 +1281,11 @@ fn page_fetch_task(
 }
 
 pub fn command_action_label(action: CommandAction) []const u8 {
-    return switch (action) {
-        .add => "Add bookmark",
-        .open => "Open selected bookmark",
-        .toggle_favorite => "Toggle favorite",
-        .refresh => "Refresh page preview",
-        .browse_all => "Browse all bookmarks",
-        .browse_favorites => "Browse favorites",
-    };
+    return actions.label(action);
 }
 
 pub fn command_action_detail(action: CommandAction) []const u8 {
-    return switch (action) {
-        .add => "Create a saved link",
-        .open => "Launch in the default browser",
-        .toggle_favorite => "Add or remove the star",
-        .refresh => "Fetch title, summary, and content",
-        .browse_all => "Reset search and tag filters",
-        .browse_favorites => "Show starred links only",
-    };
+    return actions.detail(action);
 }
 
 fn bookmark_matches_command(
@@ -1307,7 +1364,7 @@ test "command deck fuzzy filters and selects a bookmark" {
     _ = try application.handle_key(.{ .character = 'g' });
     _ = try application.handle_key(.{ .character = 's' });
     try std.testing.expectEqual(Mode.command, application.mode);
-    try std.testing.expectEqual(@as(u16, 1), application.command_result_count);
+    try std.testing.expectEqual(@as(u16, 1), application.command.count);
     _ = try application.handle_key(.enter);
     try std.testing.expectEqual(Mode.browse, application.mode);
     try std.testing.expectEqualStrings(
@@ -1451,4 +1508,19 @@ test "mouse selects telescope categories results and form fields" {
         .button = .primary,
     } });
     try std.testing.expectEqual(Field.tags, application.field);
+}
+
+test "an unreadable store is reported rather than failing the launch" {
+    const paths = try @import("data").paths.Paths.under_home(
+        "/tmp/readmarks-unreadable-probe",
+    );
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &paths,
+    );
+    defer application.destroy(std.testing.allocator);
+
+    try application.load();
+    try std.testing.expectEqual(@as(u16, 0), application.store.count);
 }

@@ -2,8 +2,6 @@ const std = @import("std");
 const limits = @import("limits.zig");
 const Paths = @import("data").Paths;
 
-const magic = "MARKRSS1";
-
 pub const State = struct {
     hashes: [limits.read_count_max]u64 = undefined,
     count: u16 = 0,
@@ -43,9 +41,6 @@ pub const Persistence = struct {
     directory_length: u16,
     file_path: [limits.path_bytes_max]u8 = undefined,
     file_path_length: u16,
-    /// The pre-XDG location, read from only when the current one has nothing.
-    legacy_path: [limits.path_bytes_max]u8 = undefined,
-    legacy_path_length: u16,
     buffer: [limits.state_bytes_max]u8 = undefined,
 
     pub fn init(paths: *const Paths) !Persistence {
@@ -68,19 +63,13 @@ pub const Persistence = struct {
             .{ directory, file_name },
         );
         self.file_path_length = @intCast(path.len);
-        const legacy = try std.fmt.bufPrint(
-            &self.legacy_path,
-            "{s}/{s}",
-            .{ paths.legacy.bytes(), file_name },
-        );
-        self.legacy_path_length = @intCast(legacy.len);
     }
 
     pub fn load(self: *Persistence, io: std.Io, state: *State) !void {
-        const current = try self.read(io, self.file_path[0..self.file_path_length]);
-        const bytes = current orelse
-            try self.read(io, self.legacy_path[0..self.legacy_path_length]) orelse
-            return;
+        const bytes = try self.read(
+            io,
+            self.file_path[0..self.file_path_length],
+        ) orelse return;
         if (bytes.len == self.buffer.len) return error.StateFileTooLarge;
         try decode(bytes, state);
     }
@@ -119,7 +108,6 @@ pub const Persistence = struct {
 
 pub fn encode(state: *const State, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
-    try writer.writeAll(magic);
     try write_integer(u16, &writer, state.count);
     var index: u16 = 0;
     while (index < state.count) : (index += 1) {
@@ -129,9 +117,7 @@ pub fn encode(state: *const State, output: []u8) ![]const u8 {
 }
 
 pub fn decode(input: []const u8, state: *State) !void {
-    if (input.len < magic.len + @sizeOf(u16)) return error.InvalidState;
-    if (!std.mem.eql(u8, input[0..magic.len], magic)) return error.InvalidState;
-    var cursor: usize = magic.len;
+    var cursor: usize = 0;
     const count = try read_integer(u16, input, &cursor);
     if (count > limits.read_count_max) return error.InvalidState;
     var decoded = State{};

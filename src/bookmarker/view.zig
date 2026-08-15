@@ -4,7 +4,7 @@ const terminal = markix.terminal;
 const layout = markix.layout;
 const application_module = @import("application.zig");
 const dom_view = @import("dom_view.zig");
-const theme = @import("theme.zig");
+const theme = @import("../theme.zig");
 
 const Rect = layout.Rect;
 const Surface = terminal.Surface;
@@ -75,7 +75,7 @@ fn register_regions(
     if (regions.command_results) |rect| {
         application.mouse_layout.command_results = .{
             .rect = rect,
-            .scroll = application.command_scroll,
+            .scroll = application.command.scroll,
             .row_height = dom_view.command_list_visual.row_height,
         };
     }
@@ -361,11 +361,11 @@ test "switching experience marks the bookmarker surface lost" {
     );
     defer application.destroy(std.testing.allocator);
     application.bookmarker.dom_view.surface_lost = false;
-    _ = try application.handle_key(.{ .control = 'b' });
+    _ = try application.handle_key(.{ .control = 'u' });
     try std.testing.expect(application.bookmarker.dom_view.surface_lost);
 
     application.bookmarker.dom_view.surface_lost = false;
-    _ = try application.handle_key(.{ .control = 'b' });
+    _ = try application.handle_key(.{ .control = 'u' });
     try std.testing.expect(application.bookmarker.dom_view.surface_lost);
 }
 
@@ -418,7 +418,9 @@ test "bookmark view renders scopes content and responsive layouts" {
 test "the add form renders its fields through the dom tree" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    _ = try application.handle_key(.{ .character = 'a' });
+    _ = try application.handle_key(.{ .character = ':' });
+    for ("> with details") |byte| _ = try application.handle_key(.{ .character = byte });
+    _ = try application.handle_key(.enter);
 
     var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 40);
     defer canvas.deinit();
@@ -449,22 +451,23 @@ test "command deck renders as a responsive sidecar" {
     application.filtered[0] = 0;
     application.filtered_count = 1;
     _ = try application.handle_key(.{ .character = ':' });
+    for ("> add bookmark") |byte| _ = try application.handle_key(.{ .character = byte });
 
     var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 40);
     defer canvas.deinit();
     canvas.resizable = true;
     try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "COMMAND DECK"));
-    try std.testing.expect(canvas_has_text(&canvas, "Add bookmark"));
+    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
+    try std.testing.expect(application.command.count > 0);
     try std.testing.expect(application.mouse_layout.command_results != null);
     canvas.text_entries.clearRetainingCapacity();
     try canvas.resize(80, 20);
     try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "COMMAND DECK"));
+    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
     canvas.text_entries.clearRetainingCapacity();
     try canvas.resize(40, 16);
     try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "COMMAND DECK"));
+    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
 }
 
 test "focus mode renders a list and responsive floating finder" {
@@ -491,7 +494,7 @@ test "focus mode renders a list and responsive floating finder" {
     );
     defer focus_canvas.deinit();
     try render(application, &focus_canvas);
-    try std.testing.expect(canvas_has_text(&focus_canvas, "FOCUS LIBRARY"));
+    try std.testing.expect(canvas_has_text(&focus_canvas, "ZEN LIBRARY"));
     try std.testing.expect(!canvas_has_text(&focus_canvas, "PREVIEW"));
     try std.testing.expect(application.mouse_layout.focus != null);
 
@@ -505,7 +508,7 @@ test "focus mode renders a list and responsive floating finder" {
     try render(application, &finder_canvas);
     try std.testing.expect(canvas_has_text(&finder_canvas, "FIND BOOKMARKS"));
     try std.testing.expect(canvas_has_text(&finder_canvas, "FILTER"));
-    try std.testing.expect(canvas_has_text(&finder_canvas, "FOCUS LIBRARY"));
+    try std.testing.expect(canvas_has_text(&finder_canvas, "ZEN LIBRARY"));
     try std.testing.expect(application.mouse_layout.focus_modal != null);
     try std.testing.expect(application.mouse_layout.finder_results != null);
     try std.testing.expect(application.mouse_layout.category_count > 0);
@@ -548,4 +551,69 @@ fn canvas_has_text_in(
         return true;
     }
     return false;
+}
+
+test "the help sheet floats over the workspace from one keymap" {
+    const application = try seeded_application();
+    defer application.destroy(std.testing.allocator);
+    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 80);
+    defer canvas.deinit();
+
+    _ = try application.handle_key(.{ .character = '?' });
+    try render(application, &canvas);
+    try std.testing.expect(canvas_has_text(&canvas, "KEYBOARD HELP"));
+    // Shared bindings come first, then the ones only this experience has.
+    try std.testing.expect(canvas_has_text(&canvas, "command centre"));
+    try std.testing.expect(canvas_has_text(&canvas, "reader / bookmarks"));
+    try std.testing.expect(canvas_has_text(&canvas, "toggle favourite"));
+
+    canvas.commit_frame();
+    _ = try application.handle_key(.escape);
+    try render(application, &canvas);
+    try std.testing.expect(!canvas_has_text(&canvas, "KEYBOARD HELP"));
+}
+
+test "the status line advertises switching experiences everywhere" {
+    const application = try seeded_application();
+    defer application.destroy(std.testing.allocator);
+    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 40);
+    defer canvas.deinit();
+
+    try render(application, &canvas);
+    try std.testing.expect(canvas_has_text(&canvas, "ctrl-u"));
+    try std.testing.expect(canvas_has_text(&canvas, "switch"));
+}
+
+test "the command centre opens on ctrl-p as well as colon" {
+    const application = try seeded_application();
+    defer application.destroy(std.testing.allocator);
+    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 40);
+    defer canvas.deinit();
+
+    _ = try application.handle_key(.{ .control = 'p' });
+    try render(application, &canvas);
+    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
+}
+
+test "adding a bookmark asks for the URL then its tags" {
+    const application = try seeded_application();
+    defer application.destroy(std.testing.allocator);
+
+    _ = try application.handle_key(.{ .character = 'a' });
+    try std.testing.expect(application.command.is_collecting());
+    try std.testing.expectEqualStrings("Add bookmark", application.active_label());
+
+    for ("https://example.com/one") |byte| {
+        _ = try application.handle_key(.{ .character = byte });
+    }
+    _ = try application.handle_key(.enter);
+    try std.testing.expect(application.command.is_collecting());
+
+    for ("reading, zig") |byte| _ = try application.handle_key(.{ .character = byte });
+    _ = try application.handle_key(.enter);
+
+    try std.testing.expect(!application.command.is_open());
+    const added = application.store.items[application.store.count - 1];
+    try std.testing.expectEqualStrings("https://example.com/one", added.url.bytes());
+    try std.testing.expectEqualStrings("reading, zig", added.tags.bytes());
 }

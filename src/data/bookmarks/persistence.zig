@@ -5,9 +5,6 @@ const Paths = @import("../paths.zig").Paths;
 const Bookmark = @import("bookmark.zig").Bookmark;
 const Store = @import("store.zig").Store;
 
-const magic_v1 = "MARKIX01";
-const magic_v2 = "MARKIX02";
-
 fn cwd() std.Io.Dir {
     if (comptime builtin.target.cpu.arch.isWasm()) {
         return .{ .handle = {} };
@@ -24,11 +21,6 @@ pub const Persistence = struct {
     directory_length: u16,
     file_path: [limits.path_bytes_max]u8 = undefined,
     file_path_length: u16,
-    /// The store's pre-XDG location, read from only when the current one has
-    /// nothing. Saving always writes the current one, so the first save after
-    /// an upgrade moves the store across without touching what was there.
-    legacy_path: [limits.path_bytes_max]u8 = undefined,
-    legacy_path_length: u16,
     buffer: [limits.storage_bytes_max]u8 = undefined,
 
     pub fn init(paths: *const Paths) !Persistence {
@@ -51,19 +43,13 @@ pub const Persistence = struct {
             .{ directory, file_name },
         );
         self.file_path_length = @intCast(file_path.len);
-        const legacy = try std.fmt.bufPrint(
-            &self.legacy_path,
-            "{s}/{s}",
-            .{ paths.legacy.bytes(), file_name },
-        );
-        self.legacy_path_length = @intCast(legacy.len);
     }
 
     pub fn load(self: *Persistence, io: std.Io, store: *Store) !void {
-        const current = try self.read(io, self.file_path[0..self.file_path_length]);
-        const bytes = current orelse
-            try self.read(io, self.legacy_path[0..self.legacy_path_length]) orelse
-            return;
+        const bytes = try self.read(
+            io,
+            self.file_path[0..self.file_path_length],
+        ) orelse return;
         if (bytes.len == self.buffer.len) return error.StorageTooLarge;
         try decode(bytes, store);
     }
@@ -100,7 +86,6 @@ pub const Persistence = struct {
 
 pub fn encode(store: *const Store, output: []u8) ![]const u8 {
     var writer = std.Io.Writer.fixed(output);
-    try writer.writeAll(magic_v2);
     try write_integer(u16, &writer, store.count);
     var index: u16 = 0;
     while (index < store.count) : (index += 1) {
@@ -122,42 +107,29 @@ fn write_bookmark_fields(writer: *std.Io.Writer, bookmark: *const Bookmark) !voi
     try write_field(writer, bookmark.preview.bytes());
 }
 
+/// The file is a count followed by that many records, and nothing else. There
+/// is no header: the record count, the per-field lengths and the requirement
+/// that the last record ends exactly at the end of the file are what a valid
+/// store has to satisfy, and anything else fails to decode.
 pub fn decode(input: []const u8, store: *Store) !void {
-    if (input.len < magic_v1.len + 2) return error.InvalidStorage;
-    if (std.mem.eql(u8, input[0..magic_v2.len], magic_v2)) {
-        return decode_records(input, magic_v2.len, store, .v2);
-    }
-    if (std.mem.eql(u8, input[0..magic_v1.len], magic_v1)) {
-        return decode_records(input, magic_v1.len, store, .v1);
-    }
-    return error.InvalidStorage;
-}
-
-const Version = enum { v1, v2 };
-
-fn decode_records(input: []const u8, start: usize, store: *Store, version: Version) !void {
-    var cursor = start;
+    var cursor: usize = 0;
     const count = try read_integer(u16, input, &cursor);
     if (count > limits.bookmark_count_max) return error.InvalidStorage;
     var decoded = Store{};
     while (decoded.count < count) {
-        const bookmark = try decode_bookmark(input, &cursor, version);
+        const bookmark = try decode_bookmark(input, &cursor);
         decoded.add(bookmark) catch return error.InvalidStorage;
     }
     if (cursor != input.len) return error.InvalidStorage;
     store.* = decoded;
 }
 
-fn decode_bookmark(input: []const u8, cursor: *usize, version: Version) !Bookmark {
-    if (cursor.* >= input.len) return error.InvalidStorage;
+fn decode_bookmark(input: []const u8, cursor: *usize) !Bookmark {
+    if (cursor.* + 1 >= input.len) return error.InvalidStorage;
     const favorite = input[cursor.*] != 0;
     cursor.* += 1;
-    const custom_title = if (version == .v2) custom: {
-        if (cursor.* >= input.len) return error.InvalidStorage;
-        const value = input[cursor.*] != 0;
-        cursor.* += 1;
-        break :custom @as(?bool, value);
-    } else null;
+    const custom_title = input[cursor.*] != 0;
+    cursor.* += 1;
     const open_count = try read_integer(u32, input, cursor);
     const title = try read_field(input, cursor);
     const url = try read_field(input, cursor);
@@ -166,17 +138,13 @@ fn decode_bookmark(input: []const u8, cursor: *usize, version: Version) !Bookmar
     var bookmark = Bookmark.init(title, url, tags, notes) catch
         return error.InvalidStorage;
     bookmark.favorite = favorite;
-    bookmark.custom_title = custom_title orelse !std.mem.eql(u8, title, url);
+    bookmark.custom_title = custom_title;
     bookmark.open_count = open_count;
-    if (version == .v2) try decode_page_fields(input, cursor, &bookmark);
-    return bookmark;
-}
-
-fn decode_page_fields(input: []const u8, cursor: *usize, bookmark: *Bookmark) !void {
     const description = try read_field(input, cursor);
     const preview = try read_field(input, cursor);
     bookmark.description.set(description) catch return error.InvalidStorage;
     bookmark.preview.set(preview) catch return error.InvalidStorage;
+    return bookmark;
 }
 
 fn write_field(writer: *std.Io.Writer, value: []const u8) !void {
@@ -225,21 +193,4 @@ test "persistence round trips cached metadata and rejects truncation" {
         error.InvalidStorage,
         decode(encoded[0 .. encoded.len - 1], &target),
     );
-}
-
-test "version one URL titles migrate as automatic titles" {
-    var buffer: [512]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writer.writeAll(magic_v1);
-    try write_integer(u16, &writer, 1);
-    try writer.writeByte(0);
-    try write_integer(u32, &writer, 0);
-    try write_field(&writer, "https://example.com");
-    try write_field(&writer, "https://example.com");
-    try write_field(&writer, "");
-    try write_field(&writer, "");
-
-    var store = Store{};
-    try decode(writer.buffered(), &store);
-    try std.testing.expect(!store.items[0].custom_title);
 }

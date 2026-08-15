@@ -3,7 +3,15 @@ const markix = @import("markix");
 const layout = markix.layout;
 const dom = markix.dom;
 const widgets = markix.widgets;
-const theme = @import("theme.zig");
+const theme = @import("../theme.zig");
+const ui = @import("../ui/tokens.zig");
+const ui_pane = @import("../ui/pane.zig");
+const command_center = @import("../ui/command_center.zig");
+const ui_header = @import("../ui/header.zig");
+const ui_status = @import("../ui/status.zig");
+const ui_help = @import("../ui/help.zig");
+const command_policy = @import("../command.zig");
+const keymap = @import("../keymap.zig");
 
 const Rect = layout.Rect;
 const LayoutElement = layout.LayoutElement;
@@ -18,126 +26,53 @@ pub const rows_max: u16 = 64;
 
 pub const PaneKind = enum { scopes, bookmarks, preview };
 
-pub const pane_chrome = widgets.PanelChrome{
-    .rail_width = 1,
-    .rail_height = 3,
-    .content_padding_left = 1,
-    .content_padding_top = 1,
-    .header_background = false,
-    .title_attributes = .{ .bold = true },
-};
+pub const pane_chrome = ui.pane_chrome;
+pub const header_chrome = ui.header_chrome;
+pub const overlay_chrome = ui.overlay_chrome;
+pub const form_chrome = ui.form_chrome;
+pub const bookmark_list_visual = ui.item_list_visual;
+pub const scope_list_visual = ui.row_list_visual;
+pub const command_list_visual = ui.command_list_visual;
+const status_visual = ui.status_visual;
 
-/// The header is a panel with no rail: a strip of panel colour carrying the
-/// application's name and counts, with a row of its own underneath for the
-/// mode's controls.
-pub const header_chrome = widgets.PanelChrome{
-    .rail_width = 0,
-    .rail_height = 0,
-    .content_padding_left = 0,
-    .content_padding_top = 1,
-    .header_background = false,
-    .title_attributes = .{ .bold = true },
-};
-
-/// Chrome for the surfaces that float over the workspace -- the command deck
-/// and the focus finder. Deeper padding and a filled header row set them apart
-/// from the panes they cover.
-pub const overlay_chrome = widgets.PanelChrome{
-    .rail_width = 1,
-    .rail_height = 4,
-    .content_padding_left = 2,
-    .content_padding_top = 2,
-    .header_background = true,
-    .title_attributes = .{ .bold = true },
-};
-
-pub const form_chrome = widgets.PanelChrome{
-    .rail_width = 1,
-    .rail_height = 0,
-    .content_padding_left = 2,
-    .content_padding_top = 2,
-    .header_background = true,
-    .title_attributes = .{ .bold = true },
-};
-
-pub const bookmark_list_visual = widgets.ListVisual{
-    .row_height = 2,
-    .selected_marker = '>',
-    .title_attributes = .{ .bold = true },
-    .selected_attributes = .{ .bold = true },
-    .subtitle_attributes = .{ .dim = true },
-    .detail_width_divisor = 3,
-};
-
-pub const scope_list_visual = widgets.ListVisual{
-    .row_height = 1,
-    .selected_marker = '>',
-    .detail_width_divisor = 3,
-};
-
-/// Command results read like bookmarks: a title to fuzzy match against and a
-/// line of detail beneath it, with the result's kind in the marker column.
-pub const command_list_visual = widgets.ListVisual{
-    .row_height = 2,
-    .selected_marker = '>',
-    .title_attributes = .{},
-    .selected_attributes = .{ .bold = true },
-    .subtitle_attributes = .{ .dim = true },
-    .detail_width_divisor = 3,
-};
-
-const status_visual = widgets.StatusVisual{
-    .message_attributes = .{ .bold = true },
-    .key_attributes = .{ .bold = true },
-    .label_attributes = .{ .dim = true },
-    .hint_gap = 2,
-};
+const hint = ui_status.hint;
 
 const browse_hints = [_]widgets.StatusHint{
-    .{ .key = "h/l", .label = "focus" },
-    .{ .key = "j/k", .label = "move" },
-    .{ .key = "enter", .label = "open/apply" },
-    .{ .key = "1/2", .label = "all/favorites" },
-    .{ .key = "r", .label = "refresh" },
-    .{ .key = "a", .label = "add" },
-    .{ .key = "/", .label = "search" },
-    .{ .key = ":", .label = "command" },
-    .{ .key = "z", .label = "focus" },
-    .{ .key = "q", .label = "quit" },
+    hint.help,
+    hint.focus,
+    hint.move,
+    hint.activate,
+    hint.search,
+    hint.command,
+    hint.zen,
+    hint.add,
 };
 
-const search_hints = [_]widgets.StatusHint{
-    .{ .key = "enter", .label = "keep" },
-    .{ .key = "esc", .label = "clear" },
-};
+const help_hints = [_]widgets.StatusHint{hint.close};
+const search_hints = ui_status.search_hints;
+const command_hints = ui_status.prompt_hints;
 
 const add_hints = [_]widgets.StatusHint{
-    .{ .key = "tab", .label = "next field" },
-    .{ .key = "enter", .label = "next/save" },
-    .{ .key = "esc", .label = "cancel" },
-};
-
-const command_hints = [_]widgets.StatusHint{
-    .{ .key = "type", .label = "fuzzy find" },
-    .{ .key = "ctrl-n/p", .label = "move" },
-    .{ .key = "enter", .label = "run" },
-    .{ .key = "esc", .label = "close" },
+    hint.field,
+    hint.save,
+    hint.cancel,
 };
 
 const finder_hints = [_]widgets.StatusHint{
-    .{ .key = "type", .label = "fuzzy find" },
-    .{ .key = "tab", .label = "next category" },
-    .{ .key = "ctrl-n/p", .label = "move" },
-    .{ .key = "enter", .label = "apply" },
-    .{ .key = "esc", .label = "clear" },
+    hint.fuzzy,
+    hint.category,
+    hint.step,
+    hint.apply,
+    hint.clear,
 };
 
 const focus_hints = [_]widgets.StatusHint{
-    .{ .key = "j/k", .label = "move" },
-    .{ .key = "/", .label = "find" },
-    .{ .key = "enter", .label = "open" },
-    .{ .key = "f", .label = "favorite" },
-    .{ .key = "z/q", .label = "workspace" },
+    hint.move,
+    hint.find,
+    hint.activate,
+    hint.command,
+    .{ .key = "f", .label = "favourite" },
+    .{ .key = "z", .label = "workspace" },
 };
 
 const form_fields = [_]widgets.SegmentItem{
@@ -159,7 +94,7 @@ const link_label = " LINK ";
 const tags_label = " TAGS ";
 const note_label = " NOTE ";
 const summary_label = "SUMMARY";
-const focus_label = " FOCUS ";
+const focus_label = " ZEN ";
 
 /// What the frame's middle band holds. The mode picks it, and a change means a
 /// different tree rather than different props.
@@ -191,6 +126,8 @@ const Shape = struct {
     finder_rows: u16 = 0,
     finder_rect: Rect = Rect.init(0, 0, 0, 0),
     form_rect: Rect = Rect.init(0, 0, 0, 0),
+    help: ui_help.Layout = .{},
+    help_rect: Rect = Rect.init(0, 0, 0, 0),
     preview: PreviewShape = .{},
 
     fn equals(self: Shape, other: Shape) bool {
@@ -255,26 +192,9 @@ fn preview_rows(shape: PreviewShape) PreviewRows {
     };
 }
 
-/// A mounted list: the panel that frames it, the list itself, and the index
-/// its first row node sits at. Rows occupy `row_count` consecutive indices.
-const ListSlot = struct {
-    panel: NodeIndex = 0,
-    list: NodeIndex = 0,
-    first_row: NodeIndex = 0,
-    row_count: u16 = 0,
-    mounted: bool = false,
-    rect: Rect = Rect.init(0, 0, 0, 0),
-    inner: Rect = Rect.init(0, 0, 0, 0),
-};
+const ListSlot = ui_pane.Slot;
 
-/// The header's second row, whichever mode owns it.
-const HeaderSlot = struct {
-    input: NodeIndex = 0,
-    badge: NodeIndex = 0,
-    tabs: NodeIndex = 0,
-    scope: NodeIndex = 0,
-    count: NodeIndex = 0,
-};
+const HeaderSlot = ui_header.Slot;
 
 const PreviewSlot = struct {
     mounted: bool = false,
@@ -295,24 +215,8 @@ const PreviewSlot = struct {
     inner: Rect = Rect.init(0, 0, 0, 0),
 };
 
-const DeckSlot = struct {
-    mounted: bool = false,
-    panel: NodeIndex = 0,
-    input: NodeIndex = 0,
-    results: ListSlot = .{},
-};
-
-const FinderSlot = struct {
-    mounted: bool = false,
-    panel: NodeIndex = 0,
-    shadow: NodeIndex = 0,
-    input: NodeIndex = 0,
-    filter: NodeIndex = 0,
-    categories: NodeIndex = 0,
-    results: ListSlot = .{},
-    rect: Rect = Rect.init(0, 0, 0, 0),
-    categories_rect: Rect = Rect.init(0, 0, 0, 0),
-};
+const DeckSlot = command_center.Slot;
+const FinderSlot = command_center.Slot;
 
 const FormSlot = struct {
     mounted: bool = false,
@@ -371,6 +275,7 @@ pub const View = struct {
 
     header: NodeIndex = 0,
     content: NodeIndex = 0,
+    workspace: NodeIndex = 0,
     status: NodeIndex = 0,
 
     header_slot: HeaderSlot = .{},
@@ -381,6 +286,7 @@ pub const View = struct {
     focus: ListSlot = .{},
     finder: FinderSlot = .{},
     form: FormSlot = .{},
+    help: ui_help.Slot = .{},
     regions: Regions = .{},
 
     /// Nodes repainted by the last frame. Instrumentation: a row edit should
@@ -407,6 +313,8 @@ pub const View = struct {
     /// Text held for the frame's props. Slices into these outlive the frame
     /// because the view does.
     scope_counts: [rows_max]Text = @splat(.{}),
+    /// Held for the status line's props, which point into it.
+    hint_buffer: [16]widgets.StatusHint = undefined,
     header_meta: Text = .{},
     header_count: Text = .{},
     scopes_meta: Text = .{},
@@ -504,6 +412,15 @@ fn measure(application: anytype, bounds: Rect) Shape {
         .workspace => measure_workspace(&shape, application, content),
         .add => shape.form_rect = form_rect(content),
         .focus => measure_focus(&shape, application, content),
+    }
+    // The sheet floats over whatever the mode was already showing, so it is
+    // measured on top rather than instead of it.
+    if (application.help_open) {
+        shape.help_rect = ui_help.rect_for(content);
+        shape.help = ui_help.layout_for(
+            shape.help_rect,
+            keymap.row_count(&keymap.bookmarker),
+        );
     }
     return shape;
 }
@@ -655,19 +572,8 @@ fn deck_rows(pane: Rect) u16 {
     return @min(@max(@divFloor(results, command_list_visual.row_height), 1), rows_max);
 }
 
-/// The finder is a floating panel, three quarters of the band it covers and
-/// capped so it stays a dialog rather than a second full screen.
 pub fn focus_finder_rect(bounds: Rect) Rect {
-    const width_scaled = @divFloor(@as(u32, bounds.width) * 3, 4);
-    const height_scaled = @divFloor(@as(u32, bounds.height) * 3, 4);
-    const width = @min(@as(u16, @intCast(width_scaled)), 84);
-    const height = @min(@as(u16, @intCast(height_scaled)), 17);
-    return Rect.init(
-        bounds.x + (bounds.width - width) / 2,
-        bounds.y + (bounds.height - height) / 2,
-        width,
-        height,
-    );
+    return ui.overlay_rect(bounds, 84, 17);
 }
 
 fn form_rect(content: Rect) Rect {
@@ -701,6 +607,7 @@ fn build(view: *View, shape: Shape) !void {
     view.focus = .{};
     view.finder = .{};
     view.form = .{};
+    view.help = .{};
 
     const root = try view.tree.set_root(.{
         .kind = .container,
@@ -711,26 +618,29 @@ fn build(view: *View, shape: Shape) !void {
             .{ .cells = 1 },
         }),
     });
-    view.header = try view.tree.append_child(root, .{
-        .kind = .panel,
-        .props = .{ .panel = .{ .chrome = header_chrome, .style = theme.panel_style } },
-        .layout = LayoutElement.free(),
-    });
+    view.header_slot = try ui_header.mount(
+        &view.tree,
+        root,
+        header_slot_kind(shape.header),
+        shape.width,
+        shape.scope_length,
+        label_width(focus_label),
+    );
+    view.header = view.header_slot.panel;
+    // The content band is always a free container so anything floating over it
+    // -- the finder, the help sheet -- is a sibling of what it covers. The
+    // workspace's own flex row is nested inside rather than being the band.
     view.content = try view.tree.append_child(root, .{
         .kind = .container,
         .props = .{ .container = {} },
-        .layout = if (shape.content == .workspace)
-            try workspace_layout(shape)
-        else
-            LayoutElement.free(),
+        .layout = LayoutElement.free(),
     });
-    view.status = try view.tree.append_child(root, .{
-        .kind = .status_line,
-        .props = .{ .status_line = .{ .style = theme.base, .visual = status_visual } },
-        .layout = LayoutElement.leaf(),
-    });
+    view.status = try ui_status.mount(&view.tree, root);
 
-    try build_header(view, shape);
+    if (shape.help.rows > 0) {
+        try build_help(view, shape);
+        return;
+    }
     switch (shape.content) {
         .workspace => try build_workspace(view, shape),
         .add => try build_form(view, shape),
@@ -740,71 +650,47 @@ fn build(view: *View, shape: Shape) !void {
 
 fn workspace_layout(shape: Shape) !LayoutElement {
     var tracks: [3]Track = undefined;
-    return LayoutElement.flex(.row, 1, workspace_tracks(shape.pane_count, &tracks));
+    var element = try LayoutElement.flex(
+        .row,
+        1,
+        workspace_tracks(shape.pane_count, &tracks),
+    );
+    const band = content_band(shape);
+    element.placement = .{
+        .x = 0,
+        .y = 0,
+        .width = band.width,
+        .height = band.height,
+    };
+    return element;
 }
 
-fn build_header(view: *View, shape: Shape) !void {
-    const row = try view.tree.append_child(view.header, .{
-        .kind = .container,
-        .props = .{ .container = {} },
-        .layout = LayoutElement.placed_free(0, 0, shape.width, 1),
-    });
-    switch (shape.header) {
-        .search => view.header_slot.input = try view.tree.append_child(row, .{
-            .kind = .text_input,
-            .props = .{ .text_input = .{} },
-            .layout = LayoutElement.placed(0, 0, shape.width, 1),
-        }),
-        .focus => {
-            const badge_width = label_width(focus_label);
-            const scope_x = badge_width + 2;
-            const count_x = scope_x + shape.scope_length + 2;
-            view.header_slot.badge = try place_badge(view, row, 0, 0, badge_width);
-            view.header_slot.scope = try place_label(
-                view,
-                row,
-                scope_x,
-                0,
-                shape.scope_length,
-            );
-            view.header_slot.count = try place_label(
-                view,
-                row,
-                count_x,
-                0,
-                shape.width -| count_x,
-            );
-        },
-        .breadcrumb => {
-            const badge_width = shape.scope_length + 2;
-            view.header_slot.badge = try place_badge(view, row, 0, 0, badge_width);
-            view.header_slot.tabs = try view.tree.append_child(row, .{
-                .kind = .segmented,
-                .props = .{ .segmented = .{} },
-                .layout = LayoutElement.placed(
-                    badge_width + 2,
-                    0,
-                    shape.width -| (badge_width + 2),
-                    1,
-                ),
-            });
-        },
-    }
+fn header_slot_kind(kind: HeaderKind) ui_header.Kind {
+    return switch (kind) {
+        .breadcrumb => .breadcrumb,
+        .search => .search,
+        .focus => .scope,
+    };
 }
 
 fn build_workspace(view: *View, shape: Shape) !void {
+    view.workspace = try view.tree.append_child(view.content, .{
+        .kind = .container,
+        .props = .{ .container = {} },
+        .layout = try workspace_layout(shape),
+    });
     for (shape.panes[0..shape.pane_count]) |kind| {
         switch (kind) {
             .scopes => try mount_list(
                 view,
-                view.content,
+                view.workspace,
                 &view.scopes,
                 shape.scope_rows,
                 scope_list_visual,
             ),
             .bookmarks => try mount_list(
                 view,
-                view.content,
+                view.workspace,
                 &view.bookmarks,
                 shape.bookmark_rows,
                 bookmark_list_visual,
@@ -818,7 +704,7 @@ fn build_workspace(view: *View, shape: Shape) !void {
 }
 
 fn build_preview(view: *View, shape: Shape) !void {
-    const panel = try view.tree.append_child(view.content, .{
+    const panel = try view.tree.append_child(view.workspace, .{
         .kind = .panel,
         .props = .{ .panel = .{ .chrome = pane_chrome, .style = theme.panel_style } },
         .layout = LayoutElement.free(),
@@ -913,36 +799,10 @@ fn build_preview(view: *View, shape: Shape) !void {
 }
 
 fn build_deck(view: *View, shape: Shape) !void {
-    const panel = try view.tree.append_child(view.content, .{
-        .kind = .panel,
-        .props = .{ .panel = .{ .chrome = overlay_chrome, .style = theme.command_panel } },
-        .layout = LayoutElement.free(),
-        .focused = true,
+    view.deck = try command_center.mount(&view.tree, view.workspace, .{
+        .width = shape.width,
+        .rows = shape.deck_rows,
     });
-    view.deck = .{ .mounted = true, .panel = panel };
-    // The deck fills whichever pane slot it was given, and a placement is
-    // clipped to the box it sits in, so asking for the whole frame's width
-    // asks for all of the slot's.
-    view.deck.input = try view.tree.append_child(panel, .{
-        .kind = .text_input,
-        .props = .{ .text_input = .{} },
-        .layout = LayoutElement.placed(0, 0, shape.width, 1),
-    });
-    const list = try view.tree.append_child(panel, .{
-        .kind = .list,
-        .props = .{ .list = .{
-            .style = theme.command_panel,
-            .visual = command_list_visual,
-        } },
-        .layout = LayoutElement.placed(
-            0,
-            deck_results_row,
-            shape.width,
-            @max(shape.deck_rows * @as(u16, command_list_visual.row_height), 1),
-        ),
-    });
-    view.deck.results = .{ .list = list, .mounted = true };
-    try mount_rows(view, &view.deck.results, shape.deck_rows);
 }
 
 fn build_focus(view: *View, shape: Shape) !void {
@@ -981,65 +841,34 @@ fn build_focus(view: *View, shape: Shape) !void {
 fn build_finder(view: *View, shape: Shape) !void {
     const content = content_band(shape);
     const rect = shape.finder_rect;
-    const x = rect.x -| content.x;
-    const y = rect.y -| content.y;
-    // The shadow is a filled rect offset by one, so the finder reads as
-    // floating above the library rather than cut into it. A panel with no
-    // title and no rail is the node that fills a rect and nothing else.
-    view.finder.shadow = try view.tree.append_child(view.content, .{
-        .kind = .panel,
-        .props = .{ .panel = .{
-            .chrome = .{ .rail_width = 0, .content_padding_left = 0 },
-            .style = shadow_style(),
-        } },
-        .layout = LayoutElement.placed_free(x + 1, y + 1, rect.width, rect.height),
-    });
-    const panel = try view.tree.append_child(view.content, .{
-        .kind = .panel,
-        .props = .{ .panel = .{ .chrome = overlay_chrome, .style = theme.command_panel } },
-        .layout = LayoutElement.placed_free(x, y, rect.width, rect.height),
-        .focused = true,
-    });
     const inner = widgets.panel_content_rect(overlay_chrome, rect);
-    view.finder.mounted = true;
-    view.finder.panel = panel;
-    view.finder.input = try view.tree.append_child(panel, .{
-        .kind = .text_input,
-        .props = .{ .text_input = .{} },
-        .layout = LayoutElement.placed(0, 0, inner.width, 1),
+    view.finder = try command_center.mount(&view.tree, view.content, .{
+        .width = inner.width,
+        .rows = shape.finder_rows,
+        .filters = true,
+        .placement = Rect.init(
+            rect.x -| content.x,
+            rect.y -| content.y,
+            rect.width,
+            rect.height,
+        ),
     });
-    view.finder.filter = try place_badge(
-        view,
-        panel,
-        0,
-        finder_filter_row,
-        filter_badge_width,
+}
+
+fn build_help(view: *View, shape: Shape) !void {
+    const content = content_band(shape);
+    const rect = shape.help_rect;
+    view.help = try ui_help.mount(
+        &view.tree,
+        view.content,
+        Rect.init(
+            rect.x -| content.x,
+            rect.y -| content.y,
+            rect.width,
+            rect.height,
+        ),
+        shape.help,
     );
-    view.finder.categories = try view.tree.append_child(panel, .{
-        .kind = .segmented,
-        .props = .{ .segmented = .{} },
-        .layout = LayoutElement.placed(
-            filter_badge_width + 1,
-            finder_filter_row,
-            inner.width -| (filter_badge_width + 1),
-            1,
-        ),
-    });
-    const list = try view.tree.append_child(panel, .{
-        .kind = .list,
-        .props = .{ .list = .{
-            .style = theme.command_panel,
-            .visual = bookmark_list_visual,
-        } },
-        .layout = LayoutElement.placed(
-            0,
-            finder_results_row,
-            inner.width,
-            @max(inner.height -| finder_results_row, 1),
-        ),
-    });
-    view.finder.results = .{ .list = list, .mounted = true };
-    try mount_rows(view, &view.finder.results, shape.finder_rows);
 }
 
 fn build_form(view: *View, shape: Shape) !void {
@@ -1213,6 +1042,9 @@ fn update(view: *View, application: anytype) !void {
     if (view.focus.mounted) update_focus(view, application);
     if (view.finder.mounted) update_finder(view, application);
     if (view.form.mounted) update_form(view, application);
+    if (view.help.mounted) {
+        ui_help.update(&view.tree, &view.help, &keymap.bookmarker, "KEYBOARD HELP");
+    }
 }
 
 fn update_header(view: *View, application: anytype) void {
@@ -1220,101 +1052,54 @@ fn update_header(view: *View, application: anytype) void {
         "{d} SAVED  {d} SHOWN",
         .{ application.store.count, application.filtered_count },
     );
-    view.tree.set_props(view.header, .{ .panel = .{
-        .style = theme.panel_style,
-        .chrome = header_chrome,
+    const body: ui_header.Body = switch (view.shape.header) {
+        .search => .{ .search = .{
+            .prompt = " SEARCH ",
+            .placeholder = "title, URL, tag, note, or page text",
+            .value = application.search.value(),
+            .cursor = application.search.cursor,
+        } },
+        .focus => .{ .scope = .{
+            .badge = focus_label,
+            .name = scope_name(application),
+            .detail = view.header_count.set(
+                "/  {d} MATCHES",
+                .{application.filtered_count},
+            ),
+            .accent = theme.accent_warm,
+        } },
+        .breadcrumb => .{ .breadcrumb = .{
+            .scope = scope_name(application),
+            .tabs = &browser_tabs,
+            .selected = focus_index(application.browser_focus),
+            .accent = focus_accent(application.browser_focus),
+        } },
+    };
+    ui_header.update(&view.tree, &view.header_slot, .{
         .title = "BOOKMARKS",
         .meta = meta,
-    } });
-    switch (view.shape.header) {
-        .search => {
-            view.tree.set_focused(view.header_slot.input, true);
-            view.tree.set_props(view.header_slot.input, .{ .text_input = .{
-                .style = theme.focused_field,
-                .prompt = " SEARCH ",
-                .placeholder = "title, URL, tag, note, or page text",
-                .value = application.search.value(),
-                .cursor = application.search.cursor,
-            } });
-        },
-        .focus => {
-            view.tree.set_props(view.header_slot.badge, .{ .badge = .{
-                .text = focus_label,
-                .style = .{
-                    .foreground = theme.inverse_foreground,
-                    .background = theme.accent_warm,
-                    .attributes = .{ .bold = true },
-                    .padding = 0,
-                },
-            } });
-            view.tree.set_props(view.header_slot.scope, .{ .label = .{
-                .text = scope_name(application),
-                .style = strong_style(),
-            } });
-            view.tree.set_props(view.header_slot.count, .{ .label = .{
-                .text = view.header_count.set(
-                    "/  {d} MATCHES",
-                    .{application.filtered_count},
-                ),
-                .style = theme.panel_style,
-                .muted = true,
-            } });
-        },
-        .breadcrumb => {
-            view.tree.set_props(view.header_slot.badge, .{ .badge = .{
-                .text = scope_name(application),
-                .style = .{
-                    .foreground = theme.foreground_strong,
-                    .background = theme.panel_alt,
-                    .attributes = .{ .bold = true },
-                },
-            } });
-            view.tree.set_props(view.header_slot.tabs, .{ .segmented = .{
-                .active_style = .{
-                    .foreground = focus_accent(application.browser_focus),
-                    .background = theme.background,
-                    .attributes = .{ .bold = true },
-                },
-                .idle_style = .{
-                    .foreground = theme.muted,
-                    .background = theme.panel,
-                    .attributes = .{ .dim = true },
-                },
-                .gap = 1,
-                .items = &browser_tabs,
-                .selected = focus_index(application.browser_focus),
-            } });
-        },
-    }
+        .body = body,
+    });
 }
 
 fn update_status(view: *View, application: anytype) void {
-    const style = if (application.mode == .confirm_delete)
-        theme.warning
-    else
-        theme.base;
-    const message: []const u8 = switch (application.mode) {
-        .browse, .confirm_delete, .add => application.message.bytes(),
-        .search => "Search within the active scope",
-        .command => "Command deck",
-        .focus => if (application.focus_search_open)
-            "Telescope search"
-        else
-            application.message.bytes(),
-    };
-    const hints: []const widgets.StatusHint = switch (application.mode) {
+    // An overlay names itself in its own title bar, so the status line does not
+    // repeat it; it keeps showing what the application last had to say.
+    const message = application.message.bytes();
+    const own: []const widgets.StatusHint = if (application.help_open)
+        &help_hints
+    else switch (application.mode) {
         .browse, .confirm_delete => &browse_hints,
         .search => &search_hints,
         .add => &add_hints,
         .command => &command_hints,
         .focus => if (application.focus_search_open) &finder_hints else &focus_hints,
     };
-    view.tree.set_props(view.status, .{ .status_line = .{
-        .style = style,
-        .visual = status_visual,
+    ui_status.update(&view.tree, view.status, .{
         .message = message,
-        .hints = hints,
-    } });
+        .hints = ui_status.with_trailer(&view.hint_buffer, own),
+        .warning = application.mode == .confirm_delete,
+    });
 }
 
 fn update_scopes(view: *View, application: anytype) void {
@@ -1388,7 +1173,7 @@ fn update_focus(view: *View, application: anytype) void {
     view.tree.set_props(view.focus.panel, .{ .panel = .{
         .style = style,
         .chrome = pane_chrome,
-        .title = "FOCUS LIBRARY",
+        .title = "ZEN LIBRARY",
         .meta = meta,
     } });
     update_bookmark_list(view, application, &view.focus, style, application.search.value());
@@ -1406,11 +1191,22 @@ fn update_bookmark_list(
     style: markix.Style,
     highlight: []const u8,
 ) void {
+    var safe = highlight;
+    if (safe.len > 0) {
+        var scan = application.scroll;
+        while (scan < application.filtered_count) : (scan += 1) {
+            const item = &application.store.items[application.filtered[scan]];
+            if (!ui_pane.is_ascii(item.title.bytes())) {
+                safe = "";
+                break;
+            }
+        }
+    }
     view.tree.set_props(slot.list, .{ .list = .{
         .style = style,
         .empty_text = empty_bookmark_text(application),
-        .highlight_query = highlight,
-        .match_foreground = if (highlight.len > 0) theme.command else null,
+        .highlight_query = safe,
+        .match_foreground = if (safe.len > 0) theme.command else null,
         .visual = bookmark_list_visual,
         .item_count = application.filtered_count,
         .selected = application.selected -| application.scroll,
@@ -1449,7 +1245,6 @@ fn update_preview(view: *View, application: anytype) void {
         .style = style,
         .chrome = pane_chrome,
         .title = "PREVIEW",
-        .meta = "READER",
     } });
     if (!view.shape.preview.selection) {
         view.tree.set_props(view.preview.empty, .{ .badge = .{
@@ -1542,94 +1337,57 @@ fn update_preview_content(view: *View, application: anytype, bookmark: anytype) 
 }
 
 fn update_deck(view: *View, application: anytype) void {
-    const meta = view.deck_meta.set("{d} RESULTS", .{application.command_result_count});
-    view.tree.set_props(view.deck.panel, .{ .panel = .{
-        .style = theme.command_panel,
-        .chrome = overlay_chrome,
-        .title = "COMMAND DECK",
-        .meta = meta,
-    } });
-    view.tree.set_focused(view.deck.input, true);
-    view.tree.set_props(view.deck.input, .{ .text_input = .{
-        .style = theme.command_field,
-        .prompt = ": ",
-        .placeholder = "Find anything or run an action",
-        .value = application.command.value(),
-        .cursor = application.command.cursor,
-    } });
-    view.tree.set_focused(view.deck.results.list, true);
-    view.tree.set_props(view.deck.results.list, .{ .list = .{
-        .style = theme.command_panel,
-        .empty_text = "No matching commands, bookmarks, or tags",
-        .highlight_query = application.command.value(),
-        .match_foreground = theme.command,
-        .visual = command_list_visual,
-        .item_count = application.command_result_count,
-        .selected = application.command_selected -| application.command_scroll,
-    } });
-    var row: u16 = 0;
-    while (row < view.deck.results.row_count) : (row += 1) {
-        const result_index = application.command_scroll + row;
-        const node = view.deck.results.first_row + row;
-        if (result_index >= application.command_result_count) {
-            view.tree.set_props(node, .{ .list_item = .{} });
-            continue;
-        }
-        const result = application.command_results[result_index];
-        view.tree.set_props(node, .{ .list_item = .{
-            .title = application.command_result_title(result),
-            .subtitle = application.command_result_detail(result),
-            .marker = command_result_marker(result),
-            .selected = result_index == application.command_selected,
-        } });
+    if (application.active_argument()) |argument| {
+        command_center.update_surface(
+            &view.tree,
+            &view.deck,
+            command_policy.argument_config(
+                application.active_label(),
+                argument.placeholder,
+            ),
+            application.command.query(),
+            application.command.input.cursor,
+        );
+        ui_pane.update_list(&view.tree, &view.deck.results, .{
+            .role = .command,
+            .focused = true,
+            .empty_text = "",
+            .visual = ui.command_list_visual,
+        });
+        ui_pane.clear_rows_from(&view.tree, &view.deck.results, 0);
+        return;
     }
+    const meta = view.deck_meta.set("{d} RESULTS", .{application.command.count});
+    command_center.update(
+        &view.tree,
+        &view.deck,
+        &application.command,
+        application,
+        command_policy.deck_config(meta, application.command.query()),
+    );
 }
 
+/// The finder is the command centre's surface over the bookmark list itself:
+/// it narrows the collection in place rather than gathering results of its
+/// own, so the surface is shared but the rows underneath stay the library's.
 fn update_finder(view: *View, application: anytype) void {
-    view.tree.set_props(view.finder.panel, .{ .panel = .{
-        .style = theme.command_panel,
-        .chrome = overlay_chrome,
-        .title = "FIND BOOKMARKS",
-        .meta = scope_name(application),
-    } });
-    view.tree.set_props(view.finder.shadow, .{ .panel = .{
-        .style = shadow_style(),
-        .chrome = .{ .rail_width = 0, .content_padding_left = 0 },
-    } });
-    view.tree.set_focused(view.finder.input, true);
-    view.tree.set_props(view.finder.input, .{ .text_input = .{
-        .style = theme.command_field,
-        .prompt = "/ ",
-        .placeholder = "Fuzzy search titles, URLs, tags, notes, and page text",
-        .value = application.search.value(),
-        .cursor = application.search.cursor,
-    } });
-    view.tree.set_props(view.finder.filter, .{ .badge = .{
-        .text = "FILTER",
-        .style = .{
-            .foreground = theme.inverse_foreground,
-            .background = theme.accent_cool,
-            .attributes = .{ .bold = true },
-            .padding = 1,
-        },
-    } });
     const selected = update_categories(view, application);
-    view.tree.set_props(view.finder.categories, .{ .segmented = .{
-        .active_style = .{
-            .foreground = theme.inverse_foreground,
-            .background = theme.command,
-            .attributes = .{ .bold = true },
-        },
-        .idle_style = .{
-            .foreground = theme.muted,
-            .background = theme.command_panel.background,
-            .attributes = .{ .dim = true },
-        },
-        .gap = 1,
-        .items = view.categories[0..view.category_count],
-        .selected = selected,
-    } });
-    view.tree.set_focused(view.finder.results.list, true);
+    command_center.update_surface(
+        &view.tree,
+        &view.finder,
+        command_policy.finder_config(
+            "FIND BOOKMARKS",
+            scope_name(application),
+            "Fuzzy search titles, URLs, tags, notes, and page text",
+            .{
+                .items = view.categories[0..view.category_count],
+                .selected = selected,
+                .label = command_policy.finder.filter_label,
+            },
+        ),
+        application.search.value(),
+        application.search.cursor,
+    );
     update_bookmark_list(
         view,
         application,
@@ -1804,10 +1562,8 @@ fn capture_rects(view: *View) void {
     if (view.preview.mounted) {
         view.preview.inner = view.content_rect(view.preview.panel);
     }
-    if (view.finder.mounted) {
-        view.finder.rect = view.node_rect(view.finder.panel);
-        view.finder.categories_rect = view.node_rect(view.finder.categories);
-    }
+    command_center.capture_rects(&view.tree, &view.finder);
+    command_center.capture_rects(&view.tree, &view.deck);
 }
 
 fn capture_list_rects(view: *View, slot: *ListSlot) void {
@@ -1843,7 +1599,7 @@ fn capture_regions(view: *View) void {
 /// Walks the segmented widget's own maths so each category's hit box is the
 /// badge the user sees.
 fn capture_categories(view: *View) void {
-    const rect = view.finder.categories_rect;
+    const rect = view.finder.filters_rect;
     var column: u16 = 0;
     var index: u8 = 0;
     while (index < view.category_count) : (index += 1) {

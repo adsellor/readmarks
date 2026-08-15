@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const terminal = @import("markix").terminal;
 const Application = @import("application.zig").Application;
-const theme = @import("markix").theme;
+const theme = @import("theme.zig");
 const view = @import("view.zig");
 const data = @import("data");
 const import_command = @import("import_command.zig");
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
         .data_home = init.environ_map.get("XDG_DATA_HOME"),
         .cache_home = init.environ_map.get("XDG_CACHE_HOME"),
     });
-    theme.configure(init.environ_map.get("MARKIX_THEME"));
+    theme.configure(init.environ_map.get("READMARKS_THEME"));
 
     var threaded: std.Io.Threaded = undefined;
     const io: std.Io = if (builtin.os.tag == .linux) io: {

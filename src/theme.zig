@@ -1,9 +1,14 @@
-const std = @import("std");
-const Color = @import("markix").Color;
-const Style = @import("markix").Style;
-const TextSelectionStyle = @import("markix").TextSelectionStyle;
+//! readmarks' palette, shared by both experiences. `accent_cool` marks what
+//! narrows a collection, `accent_warm` the collection, `accent` the document,
+//! `command` the command centre and its matches.
 
-pub const Mode = enum { markix, terminal };
+const std = @import("std");
+const markix = @import("markix");
+const Color = markix.Color;
+const Style = markix.Style;
+const TextSelectionStyle = markix.TextSelectionStyle;
+
+pub const Mode = enum { readmarks, terminal };
 
 const Palette = struct {
     background: Color,
@@ -20,6 +25,7 @@ const Palette = struct {
     accent_cool: Color,
     danger: Color,
     command: Color,
+    command_row: Color,
     shadow: Color,
     base: Style,
     panel_style: Style,
@@ -34,36 +40,37 @@ const Palette = struct {
     selection_command: TextSelectionStyle,
 };
 
-const markix_palette = make_markix_palette();
+const readmarks_palette = make_readmarks_palette();
 const terminal_palette = make_terminal_palette();
 
-pub var mode: Mode = .markix;
-pub var background = markix_palette.background;
-pub var panel = markix_palette.panel;
-pub var panel_alt = markix_palette.panel_alt;
-pub var line = markix_palette.line;
-pub var selection = markix_palette.selection;
-pub var foreground = markix_palette.foreground;
-pub var foreground_strong = markix_palette.foreground_strong;
-pub var inverse_foreground = markix_palette.inverse_foreground;
-pub var muted = markix_palette.muted;
-pub var accent = markix_palette.accent;
-pub var accent_warm = markix_palette.accent_warm;
-pub var accent_cool = markix_palette.accent_cool;
-pub var danger = markix_palette.danger;
-pub var command = markix_palette.command;
-pub var shadow = markix_palette.shadow;
-pub var base = markix_palette.base;
-pub var panel_style = markix_palette.panel_style;
-pub var focused_field = markix_palette.focused_field;
-pub var focused_panel = markix_palette.focused_panel;
-pub var warning = markix_palette.warning;
-pub var command_panel = markix_palette.command_panel;
-pub var command_field = markix_palette.command_field;
-pub var selection_browse = markix_palette.selection_browse;
-pub var selection_bookmarks = markix_palette.selection_bookmarks;
-pub var selection_preview = markix_palette.selection_preview;
-pub var selection_command = markix_palette.selection_command;
+pub var mode: Mode = .readmarks;
+pub var background = readmarks_palette.background;
+pub var panel = readmarks_palette.panel;
+pub var panel_alt = readmarks_palette.panel_alt;
+pub var line = readmarks_palette.line;
+pub var selection = readmarks_palette.selection;
+pub var foreground = readmarks_palette.foreground;
+pub var foreground_strong = readmarks_palette.foreground_strong;
+pub var inverse_foreground = readmarks_palette.inverse_foreground;
+pub var muted = readmarks_palette.muted;
+pub var accent = readmarks_palette.accent;
+pub var accent_warm = readmarks_palette.accent_warm;
+pub var accent_cool = readmarks_palette.accent_cool;
+pub var danger = readmarks_palette.danger;
+pub var command = readmarks_palette.command;
+pub var command_row = readmarks_palette.command_row;
+pub var shadow = readmarks_palette.shadow;
+pub var base = readmarks_palette.base;
+pub var panel_style = readmarks_palette.panel_style;
+pub var focused_field = readmarks_palette.focused_field;
+pub var focused_panel = readmarks_palette.focused_panel;
+pub var warning = readmarks_palette.warning;
+pub var command_panel = readmarks_palette.command_panel;
+pub var command_field = readmarks_palette.command_field;
+pub var selection_browse = readmarks_palette.selection_browse;
+pub var selection_bookmarks = readmarks_palette.selection_bookmarks;
+pub var selection_preview = readmarks_palette.selection_preview;
+pub var selection_command = readmarks_palette.selection_command;
 
 pub fn configure(value: ?[]const u8) void {
     const name = value orelse return;
@@ -72,13 +79,13 @@ pub fn configure(value: ?[]const u8) void {
     {
         apply(.terminal);
     } else {
-        apply(.markix);
+        apply(.readmarks);
     }
 }
 
 pub fn apply(next_mode: Mode) void {
     const palette = switch (next_mode) {
-        .markix => markix_palette,
+        .readmarks => readmarks_palette,
         .terminal => terminal_palette,
     };
     mode = next_mode;
@@ -102,6 +109,7 @@ fn apply_colors(palette: *const Palette) void {
     accent_cool = palette.accent_cool;
     danger = palette.danger;
     command = palette.command;
+    command_row = palette.command_row;
     shadow = palette.shadow;
 }
 
@@ -129,7 +137,7 @@ pub fn pane_style(accent_color: Color, focused: bool) Style {
     return style;
 }
 
-fn make_markix_palette() Palette {
+fn make_readmarks_palette() Palette {
     const background_color = Color.from_rgb(13, 15, 18);
     const panel_color = Color.from_rgb(22, 25, 29);
     const panel_alt_color = Color.from_rgb(31, 35, 40);
@@ -142,8 +150,16 @@ fn make_markix_palette() Palette {
     const accent_warm_color = Color.from_rgb(245, 176, 91);
     const accent_cool_color = Color.from_rgb(105, 169, 255);
     const danger_color = Color.from_rgb(240, 105, 115);
-    const command_color = Color.from_rgb(164, 209, 255);
+    const command_color = Color.from_rgb(255, 122, 156);
+    // The selected row of a command surface. Dark enough that both the row's
+    // own near-white title and the `command`-coloured match runs drawn on top
+    // of it stay legible; using `command` itself here made a match invisible
+    // the moment its row was selected.
+    const command_row_color = Color.from_rgb(72, 33, 48);
     const shadow_color = Color.from_rgb(5, 6, 8);
+    std.debug.assert(!background_color.equals(foreground_color));
+    std.debug.assert(!panel_color.equals(panel_alt_color));
+    std.debug.assert(!command_color.equals(accent_cool_color));
     return make_palette(.{
         .background = background_color,
         .panel = panel_color,
@@ -159,6 +175,7 @@ fn make_markix_palette() Palette {
         .accent_cool = accent_cool_color,
         .danger = danger_color,
         .command = command_color,
+        .command_row = command_row_color,
         .shadow = shadow_color,
     });
 }
@@ -166,6 +183,8 @@ fn make_markix_palette() Palette {
 fn make_terminal_palette() Palette {
     const background_color = Color.terminal_background();
     const foreground_color = Color.terminal_foreground();
+    std.debug.assert(background_color.kind == .terminal_background);
+    std.debug.assert(foreground_color.kind == .terminal_foreground);
     return make_palette(.{
         .background = background_color,
         .panel = background_color,
@@ -181,6 +200,7 @@ fn make_terminal_palette() Palette {
         .accent_cool = Color.ansi(4),
         .danger = Color.ansi(1),
         .command = Color.ansi(5),
+        .command_row = Color.ansi(8),
         .shadow = background_color,
     });
 }
@@ -200,10 +220,13 @@ const PaletteColors = struct {
     accent_cool: Color,
     danger: Color,
     command: Color,
+    command_row: Color,
     shadow: Color,
 };
 
 fn make_palette(colors: PaletteColors) Palette {
+    std.debug.assert(!colors.background.equals(colors.foreground));
+    std.debug.assert(!colors.foreground.equals(colors.accent));
     return .{
         .background = colors.background,
         .panel = colors.panel,
@@ -219,6 +242,7 @@ fn make_palette(colors: PaletteColors) Palette {
         .accent_cool = colors.accent_cool,
         .danger = colors.danger,
         .command = colors.command,
+        .command_row = colors.command_row,
         .shadow = colors.shadow,
         .base = base_style(colors),
         .panel_style = panel_style_value(colors),
@@ -292,7 +316,10 @@ fn command_panel_style(colors: PaletteColors) Style {
     var style = panel_style_value(colors);
     style.accent = colors.command;
     style.border = colors.command;
-    style.selected_background = colors.command;
+    // Matched characters are drawn in `command` on top of the selected row, so
+    // the row cannot be `command` too.
+    style.selected_background = colors.command_row;
+    std.debug.assert(!style.selected_background.equals(colors.command));
     return style;
 }
 
@@ -300,7 +327,7 @@ fn command_field_style(colors: PaletteColors) Style {
     var style = focused_field_style(colors);
     style.accent = colors.command;
     style.border = colors.command;
-    style.selected_background = colors.command;
+    style.selected_background = colors.command_row;
     return style;
 }
 
@@ -333,7 +360,7 @@ fn selection_style(colors: PaletteColors, selected: Color) TextSelectionStyle {
 
 test "terminal palette uses terminal defaults and ANSI accents" {
     apply(.terminal);
-    defer apply(.markix);
+    defer apply(.readmarks);
     try std.testing.expectEqual(Mode.terminal, mode);
     try std.testing.expectEqual(Color.Kind.terminal_background, background.kind);
     try std.testing.expectEqual(Color.Kind.terminal_foreground, foreground.kind);
