@@ -1,0 +1,17 @@
+.{
+    .name = .readmarks,
+    .version = "0.0.0",
+    .fingerprint = 0xe4bb56716eb891b2,
+    .minimum_zig_version = "0.17.0-dev.1476+91a29d707",
+    .dependencies = .{
+        .markix = .{
+            .url = "git+https://codeberg.org/adsellor/markix#0cf7fe5ca0089df5ba61710ff758ed5298d28330",
+            .hash = "markix-0.0.0-PwM0VHbzBwDjJZJxIDyFkw7v1fCUTbeVLaxpokUrbB-v",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
