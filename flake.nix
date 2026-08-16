@@ -32,6 +32,28 @@
     systems = builtins.attrNames inputs.zig.packages;
 
     markix_package = "markix-0.0.0-PwM0VHbzBwDjJZJxIDyFkw7v1fCUTbeVLaxpokUrbB-v";
+
+    # The binaries the ci workflow attaches to a github release, for installing
+    # without a toolchain. Fill a hash in when the tag is published:
+    #   nix store prefetch-file --hash-type sha256 <asset url>
+    # A system whose hash is still empty exposes no readmarks-bin package.
+    release = {
+      version = "0.2.0";
+      owner = "adsellor";
+      repo = "readmarks";
+      assets = {
+        x86_64-linux = "readmarks-linux-x86_64";
+        aarch64-linux = "readmarks-linux-aarch64";
+        x86_64-darwin = "readmarks-macos-x86_64";
+        aarch64-darwin = "readmarks-macos-aarch64";
+      };
+      hashes = {
+        x86_64-linux = "";
+        aarch64-linux = "";
+        x86_64-darwin = "";
+        aarch64-darwin = "";
+      };
+    };
   in
     flake-utils.lib.eachSystem systems (
       system: let
@@ -55,7 +77,7 @@
         readmarks = {llvm ? false}:
           pkgs.stdenv.mkDerivation {
             pname = "readmarks";
-            version = "0.1.0";
+            version = "0.2.0";
             src = source;
             nativeBuildInputs = [zig];
             dontConfigure = true;
@@ -72,7 +94,7 @@
             '';
             meta = {
               description = "Terminal feed reader and bookmarker";
-              homepage = "https://codeberg.org/adsellor/markix";
+              homepage = "https://codeberg.org/adsellor/readmarks";
               mainProgram = "readmarks";
               platforms = pkgs.lib.platforms.unix;
             };
@@ -80,11 +102,42 @@
         self_hosted_ready =
           pkgs.stdenv.hostPlatform.isLinux
           && pkgs.stdenv.hostPlatform.isx86_64;
+
+        release_asset = release.assets.${system} or null;
+        release_hash = release.hashes.${system} or "";
+        release_published = release_asset != null && release_hash != "";
+
+        readmarks_bin = pkgs.stdenvNoCC.mkDerivation {
+          pname = "readmarks-bin";
+          inherit (release) version;
+          src = pkgs.fetchurl {
+            url = "https://github.com/${release.owner}/${release.repo}/releases/download/v${release.version}/${release_asset}";
+            hash = release_hash;
+          };
+          dontUnpack = true;
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 "$src" "$out/bin/readmarks"
+            runHook postInstall
+          '';
+          meta = {
+            description = "Terminal feed reader and bookmarker, prebuilt";
+            homepage = "https://codeberg.org/adsellor/readmarks";
+            mainProgram = "readmarks";
+            platforms = builtins.attrNames release.assets;
+          };
+        };
       in {
-        packages.default = readmarks {llvm = !self_hosted_ready;};
-        packages.readmarks = readmarks {llvm = !self_hosted_ready;};
-        packages.readmarks-fast = readmarks {};
-        packages.readmarks-llvm = readmarks {llvm = true;};
+        packages =
+          {
+            default = readmarks {llvm = !self_hosted_ready;};
+            readmarks = readmarks {llvm = !self_hosted_ready;};
+            readmarks-fast = readmarks {};
+            readmarks-llvm = readmarks {llvm = true;};
+          }
+          // pkgs.lib.optionalAttrs release_published {
+            readmarks-bin = readmarks_bin;
+          };
 
         apps.default = {
           type = "app";

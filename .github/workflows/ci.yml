@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+      - name: Compile, test and check formatting
+        run: nix develop --command zig build check
+
+  release:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      # The runner is Linux, so every other target is a Zig cross-compile.
+      # macOS needs LLVM; the self-hosted backend cannot emit Mach-O yet.
+      - name: Cross-compile
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            mkdir -p dist
+            for target in \
+              x86_64-linux-musl \
+              aarch64-linux-musl \
+              x86_64-macos \
+              aarch64-macos
+            do
+              zig build -Dtarget="$target" -Doptimize=ReleaseFast \
+                --prefix "build/$target"
+              case "$target" in
+                *-linux-musl) name="readmarks-linux-${target%%-*}" ;;
+                *-macos)      name="readmarks-macos-${target%%-*}" ;;
+              esac
+              cp "build/$target/bin/readmarks" "dist/$name"
+            done
+            cd dist && sha256sum readmarks-* > SHA256SUMS
+          '
+
+      - name: Smoke test the native build
+        run: ./dist/readmarks-linux-x86_64 help
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/readmarks-linux-x86_64
+            dist/readmarks-linux-aarch64
+            dist/readmarks-macos-x86_64
+            dist/readmarks-macos-aarch64
+            dist/SHA256SUMS
