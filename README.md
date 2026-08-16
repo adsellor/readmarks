@@ -13,7 +13,6 @@ Built on [markix](https://codeberg.org/adsellor/markix).
 - [Installing a release binary](#installing-a-release-binary)
 - [Installing with Nix](#installing-with-nix)
 - [Home Manager](#home-manager)
-- [CI](#ci)
 
 ## Building
 
