@@ -809,9 +809,15 @@ fn update_document(view: *View, application: anytype) void {
         return;
     };
     const feed = &application.feeds[article.feed_index];
+    // A paged article says so, so a page ending mid-thought reads as a page
+    // break rather than as the end of the article.
+    const page_count = application.reader_page_count();
     ui_document.update_frame(&view.tree, &view.document, .{
         .title = article.title.bytes(),
-        .meta = view.document_meta.set("{s}", .{feed.title.bytes()}),
+        .meta = if (page_count > 1) view.document_meta.set(
+            "{s} | PAGE {d}/{d}",
+            .{ feed.title.bytes(), application.reader_page + 1, page_count },
+        ) else view.document_meta.set("{s}", .{feed.title.bytes()}),
         .focused = true,
     });
     if (application.selected_image_path()) |path| {

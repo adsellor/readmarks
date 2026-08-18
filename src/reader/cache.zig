@@ -2,6 +2,11 @@ const std = @import("std");
 const document = @import("markix").document;
 const limits = @import("limits.zig");
 const model = @import("model.zig");
+const pages = @import("pages.zig");
+
+/// The pool the cache reads and writes. It is the application's own, passed in
+/// rather than reached for, so encoding stays a function of its arguments.
+pub const Pool = pages.Pool(limits.article_page_slots_max);
 
 const SaveOutcome = union(enum) { success, failure: anyerror };
 const SaveResultQueue = std.Io.Queue(SaveOutcome);
@@ -56,6 +61,7 @@ pub const Persistence = struct {
         feed_count: u16,
         articles: *const [limits.article_count_max]model.Article,
         article_count: u16,
+        article_pages: *const Pool,
     ) !?anyerror {
         var failure: ?anyerror = null;
         var attempt: u8 = 0;
@@ -78,6 +84,7 @@ pub const Persistence = struct {
                 feed_count,
                 articles,
                 article_count,
+                article_pages,
             ) catch |err| {
                 failure = err;
             };
@@ -92,13 +99,14 @@ pub const Persistence = struct {
         feed_count: u16,
         articles: *[limits.article_count_max]model.Article,
         article_count: *u16,
+        article_pages: *Pool,
     ) !?i64 {
         const bytes = try self.read(
             io,
             self.file_path[0..self.file_path_length],
         ) orelse return null;
         if (bytes.len == self.buffer.len) return error.CacheFileTooLarge;
-        return try decode(bytes, feeds, feed_count, articles, article_count);
+        return try decode(bytes, feeds, feed_count, articles, article_count, article_pages);
     }
 
     fn read(self: *Persistence, io: std.Io, path: []const u8) !?[]const u8 {
@@ -117,12 +125,13 @@ pub const Persistence = struct {
         feed_count: u16,
         articles: *const [limits.article_count_max]model.Article,
         article_count: u16,
+        article_pages: *const Pool,
     ) !void {
         if (self.save_busy) {
             self.save_pending = true;
             return;
         }
-        try self.start_save(io, feeds, feed_count, articles, article_count);
+        try self.start_save(io, feeds, feed_count, articles, article_count, article_pages);
     }
 
     pub fn poll(
@@ -132,6 +141,7 @@ pub const Persistence = struct {
         feed_count: u16,
         articles: *const [limits.article_count_max]model.Article,
         article_count: u16,
+        article_pages: *const Pool,
     ) !?anyerror {
         if (!self.save_busy) return null;
         var completed: [1]SaveOutcome = undefined;
@@ -151,7 +161,7 @@ pub const Persistence = struct {
         };
         if (self.save_pending) {
             self.save_pending = false;
-            try self.start_save(io, feeds, feed_count, articles, article_count);
+            try self.start_save(io, feeds, feed_count, articles, article_count, article_pages);
         }
         return failure;
     }
@@ -163,6 +173,7 @@ pub const Persistence = struct {
         feed_count: u16,
         articles: *const [limits.article_count_max]model.Article,
         article_count: u16,
+        article_pages: *const Pool,
     ) !void {
         std.debug.assert(!self.save_busy);
         const bytes = try encode(
@@ -171,6 +182,7 @@ pub const Persistence = struct {
             feed_count,
             articles,
             article_count,
+            article_pages,
             &self.buffer,
         );
         self.save_length = @intCast(bytes.len);
@@ -230,6 +242,7 @@ pub fn encode(
     feed_count: u16,
     articles: *const [limits.article_count_max]model.Article,
     article_count: u16,
+    article_pages: *const Pool,
     output: []u8,
 ) ![]const u8 {
     if (feed_count > limits.feed_count_max) return error.InvalidCache;
@@ -246,12 +259,16 @@ pub fn encode(
     try write_integer(u16, &writer, article_count);
     var article_index: u16 = 0;
     while (article_index < article_count) : (article_index += 1) {
-        try write_article(&writer, &articles[article_index]);
+        try write_article(&writer, &articles[article_index], article_pages);
     }
     return writer.buffered();
 }
 
-fn write_article(writer: *std.Io.Writer, article: *const model.Article) !void {
+fn write_article(
+    writer: *std.Io.Writer,
+    article: *const model.Article,
+    article_pages: *const Pool,
+) !void {
     try write_integer(u16, writer, article.feed_index);
     try write_integer(i64, writer, article.published_timestamp);
     try write_integer(u8, writer, @intFromBool(article.content_complete));
@@ -261,6 +278,15 @@ fn write_article(writer: *std.Io.Writer, article: *const model.Article) !void {
     try write_field(writer, article.image_url.bytes());
     try write_field(writer, article.summary.bytes());
     try write_field(writer, article.published.bytes());
+    // Pages past the first, so a long article comes back long rather than
+    // needing the feed refetched to read past its opening.
+    const key = pages.key(article.url.bytes());
+    const page_count = article_pages.page_count(key);
+    try write_integer(u16, writer, page_count);
+    var sequence: u16 = 1;
+    while (sequence <= page_count) : (sequence += 1) {
+        try write_field(writer, article_pages.page(key, sequence) orelse "");
+    }
 }
 
 pub fn decode(
@@ -269,8 +295,10 @@ pub fn decode(
     feed_count: u16,
     articles: *[limits.article_count_max]model.Article,
     article_count: *u16,
+    article_pages: *Pool,
 ) !i64 {
     var cursor: usize = 0;
+    article_pages.reset();
     const saved_at_seconds = try read_integer(i64, input, &cursor);
     var feed_map: [limits.feed_count_max]?u16 = @splat(null);
     const cached_feed_count = try read_integer(u16, input, &cursor);
@@ -284,6 +312,7 @@ pub fn decode(
         &cursor,
         articles,
         article_count,
+        article_pages,
         &feed_map,
         cached_article_count,
     );
@@ -320,6 +349,7 @@ fn decode_articles(
     cursor: *usize,
     articles: *[limits.article_count_max]model.Article,
     article_count: *u16,
+    article_pages: *Pool,
     feed_map: *const [limits.feed_count_max]?u16,
     cached_article_count: u16,
 ) !void {
@@ -335,7 +365,18 @@ fn decode_articles(
         const image_url = try read_field(input, cursor);
         const summary = try read_field(input, cursor);
         const published = try read_field(input, cursor);
+        const page_count = try read_integer(u16, input, cursor);
+        if (page_count >= limits.article_pages_max) return error.InvalidCache;
         if (cached_feed_index >= limits.feed_count_max) return error.InvalidCache;
+        // The pages are read whether or not the article survives the feed
+        // mapping, because the cursor has to reach the next article either way.
+        const key = pages.key(url);
+        const wanted = feed_map[cached_feed_index] != null;
+        var sequence: u16 = 1;
+        while (sequence <= page_count) : (sequence += 1) {
+            const page = try read_field(input, cursor);
+            if (wanted) _ = article_pages.claim(key, sequence, page);
+        }
         const feed_index = feed_map[cached_feed_index] orelse continue;
         const article = try decode_article(
             feed_index,
@@ -432,6 +473,14 @@ test "cache maps articles across subscription reorder" {
     );
     defer std.testing.allocator.destroy(source_articles);
     source_articles[0] = test_article(0, "First", "https://one.test/first");
+    const source_pages = try std.testing.allocator.create(Pool);
+    defer std.testing.allocator.destroy(source_pages);
+    source_pages.* = .{};
+    try std.testing.expect(source_pages.claim(
+        pages.key("https://one.test/first"),
+        1,
+        "<p>The second page.</p>",
+    ));
     var buffer: [16_384]u8 = undefined;
     const encoded = try encode(
         42,
@@ -439,6 +488,7 @@ test "cache maps articles across subscription reorder" {
         2,
         source_articles,
         1,
+        source_pages,
         &buffer,
     );
 
@@ -450,12 +500,16 @@ test "cache maps articles across subscription reorder" {
     );
     defer std.testing.allocator.destroy(target_articles);
     var target_count: u16 = 0;
+    const target_pages = try std.testing.allocator.create(Pool);
+    defer std.testing.allocator.destroy(target_pages);
+    target_pages.* = .{};
     const saved = try decode(
         encoded,
         &target_feeds,
         2,
         target_articles,
         &target_count,
+        target_pages,
     );
     try std.testing.expectEqual(@as(i64, 42), saved);
     try std.testing.expectEqual(@as(u16, 1), target_count);
@@ -467,6 +521,11 @@ test "cache maps articles across subscription reorder" {
     try std.testing.expectEqualStrings(
         "https://one.test/image.png",
         target_articles[0].image_url.bytes(),
+    );
+    // A long article comes back long: its later pages are cached beside it.
+    try std.testing.expectEqualStrings(
+        "<p>The second page.</p>",
+        target_pages.page(pages.key("https://one.test/first"), 1).?,
     );
 }
 

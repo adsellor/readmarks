@@ -68,6 +68,7 @@ Reader only:
 | Key | Action |
 | --- | --- |
 | `v` | full-screen reader |
+| `[` `]` | previous / next page |
 | `i` | open the article image |
 | `m` | toggle read |
 | `M` | mark everything shown read |

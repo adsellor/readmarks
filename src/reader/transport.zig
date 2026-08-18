@@ -38,6 +38,7 @@ pub const Transport = struct {
         worker_index: u16,
         status: i32,
         data: []const u8,
+        staged: *parser.StagedPages,
     ) !parser.Update {
         const request = &self.requests[worker_index];
         request.active = false;
@@ -45,6 +46,6 @@ pub const Transport = struct {
         const buffer = &self.buffers[worker_index];
         const length = @min(data.len, buffer.len);
         @memcpy(buffer[0..length], data[0..length]);
-        return parser.parse(buffer[0..length], request.feed_index);
+        return parser.parse(buffer[0..length], request.feed_index, staged);
     }
 };

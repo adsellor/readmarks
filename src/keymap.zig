@@ -54,6 +54,7 @@ pub const shared = [_]Entry{
 pub const reader = [_]Entry{
     heading("READING"),
     .{ .key = "v", .label = "full-screen reader" },
+    .{ .key = "[ / ]", .label = "previous / next page" },
     .{ .key = "i", .label = "open the article image" },
     .{ .key = "m", .label = "toggle read" },
     .{ .key = "M", .label = "mark everything read" },

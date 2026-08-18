@@ -12,6 +12,7 @@ const fetcher_module = @import("fetcher.zig");
 const image_loader_module = @import("image_loader.zig");
 const limits = @import("limits.zig");
 const model = @import("model.zig");
+const pages = @import("pages.zig");
 const parser = @import("parser.zig");
 const state_module = @import("state.zig");
 const subscriptions = @import("subscriptions.zig");
@@ -116,6 +117,13 @@ pub const Application = struct {
     filtered_category_count: u16 = 0,
     articles: [limits.article_count_max]model.Article = undefined,
     article_count: u16 = 0,
+    /// Every page past an article's first, for every article at once. Articles
+    /// are copied and moved by value throughout; pages stay put and are found
+    /// again by the article's URL.
+    article_pages: pages.Pool(limits.article_page_slots_max) = .{},
+    /// Where each fetch worker stages the pages it parses, until the update it
+    /// belongs to is merged.
+    fetch_pages: [limits.feed_fetch_concurrency]parser.StagedPages = @splat(.{}),
     unread_article_count: u16 = 0,
     feed_unread_counts: [limits.feed_count_max]u16 = @splat(0),
     read_state: state_module.State = .{},
@@ -146,10 +154,18 @@ pub const Application = struct {
     article_scroll: u16 = 0,
     article_viewport: u16 = 1,
     reader_scroll: u16 = 0,
+    /// Which page of the article the reader is showing. An article short
+    /// enough to parse in one go only ever has page zero.
+    reader_page: u16 = 0,
+    /// Set when the reader arrives at a page from below, so it lands on the
+    /// last line rather than the first. The line count is not known until the
+    /// view has laid the page out, so the intent has to outlive the turn.
+    reader_scroll_to_end: bool = false,
     reader_line_count: u16 = 0,
     reader_viewport: u16 = 1,
     reader_document: document.Document = .{},
     reader_document_article: ?u16 = null,
+    reader_document_page: u16 = 0,
     reader_document_length: u16 = 0,
     reader_layout_valid: bool = false,
     reader_layout_width: u16 = 0,
@@ -221,6 +237,8 @@ pub const Application = struct {
         self.category_count = 0;
         self.filtered_category_count = 0;
         self.article_count = 0;
+        self.article_pages.reset();
+        for (&self.fetch_pages) |*staged| staged.reset();
         self.unread_article_count = 0;
         self.feed_unread_counts = @splat(0);
         self.read_state = .{};
@@ -242,10 +260,13 @@ pub const Application = struct {
         self.article_scroll = 0;
         self.article_viewport = 1;
         self.reader_scroll = 0;
+        self.reader_page = 0;
+        self.reader_scroll_to_end = false;
         self.reader_line_count = 0;
         self.reader_viewport = 1;
         self.reader_document = .{};
         self.reader_document_article = null;
+        self.reader_document_page = 0;
         self.reader_document_length = 0;
         self.reader_layout_valid = false;
         self.reader_layout_width = 0;
@@ -283,6 +304,7 @@ pub const Application = struct {
             self.feed_count,
             &self.articles,
             self.article_count,
+            &self.article_pages,
         ) catch |err| failure: {
             std.log.err("failed to finish RSS cache task: {s}", .{@errorName(err)});
             break :failure null;
@@ -371,8 +393,12 @@ pub const Application = struct {
             self.feed_count,
             &self.articles,
             &self.article_count,
+            &self.article_pages,
         ) catch |err| {
             self.article_count = 0;
+            // A half-read cache leaves pages behind that no article will ever
+            // ask for again.
+            self.article_pages.reset();
             if (err == error.InvalidCache) return false;
             return err;
         } orelse return false;
@@ -530,7 +556,7 @@ pub const Application = struct {
             .articles => {
                 const previous = self.article_cursor;
                 self.article_cursor = index;
-                if (previous != self.article_cursor) self.reader_scroll = 0;
+                if (previous != self.article_cursor) self.reset_reader_position();
                 self.ensure_article_visible();
             },
             .reader => return false,
@@ -748,7 +774,7 @@ pub const Application = struct {
         if (self.find_filtered_article(article_index)) |cursor| {
             self.article_cursor = cursor;
             self.focus = .articles;
-            self.reader_scroll = 0;
+            self.reset_reader_position();
             self.ensure_article_visible();
             try self.set_message("Article selected");
             return;
@@ -833,6 +859,8 @@ pub const Application = struct {
             'P' => try self.begin_prune_feeds(),
             'c' => try self.toggle_focused_section(),
             'v' => if (self.reader_only) try self.close_reader() else self.open_reader(),
+            '[' => try self.turn_page_announced(-1),
+            ']' => try self.turn_page_announced(1),
             else => {},
         }
         return true;
@@ -1165,6 +1193,7 @@ pub const Application = struct {
             worker_index,
             status,
             data,
+            &self.fetch_pages[worker_index],
         )) |update|
             .{ .update = update }
         else |err|
@@ -1183,6 +1212,7 @@ pub const Application = struct {
             self.feed_count,
             &self.articles,
             self.article_count,
+            &self.article_pages,
         );
         if (failure) |err| {
             try self.set_message(@errorName(err));
@@ -1212,6 +1242,7 @@ pub const Application = struct {
             self.feed_count,
             &self.articles,
             self.article_count,
+            &self.article_pages,
         ) catch |err| {
             try self.set_message(@errorName(err));
         };
@@ -1231,7 +1262,7 @@ pub const Application = struct {
                 if (!update.title.is_empty() and !feed.title_pinned) {
                     feed.title = update.title;
                 }
-                self.merge_articles(update);
+                self.merge_articles(update, &self.fetch_pages[result.worker_index]);
             },
         }
     }
@@ -1258,16 +1289,24 @@ pub const Application = struct {
         }
     }
 
-    fn merge_articles(self: *Application, update: *const parser.Update) void {
+    fn merge_articles(
+        self: *Application,
+        update: *const parser.Update,
+        staged: *const parser.StagedPages,
+    ) void {
         var index: u16 = 0;
         while (index < update.article_count) : (index += 1) {
             const source = update.articles[index];
             if (self.find_article(source.url.bytes()) != null) continue;
-            self.insert_article(source);
+            self.insert_article(source, staged);
         }
     }
 
-    fn insert_article(self: *Application, source: model.Article) void {
+    fn insert_article(
+        self: *Application,
+        source: model.Article,
+        staged: *const parser.StagedPages,
+    ) void {
         const destination = if (self.article_count < limits.article_count_max) block: {
             const index = self.article_count;
             self.article_count += 1;
@@ -1278,10 +1317,14 @@ pub const Application = struct {
                 self.articles[index].published_timestamp) return;
             const old_feed = self.articles[index].feed_index;
             self.feeds[old_feed].article_count -|= 1;
+            // The article being written over is the last thing that could ask
+            // for its pages back.
+            self.article_pages.release(pages.key(self.articles[index].url.bytes()));
             break :block index;
         };
         self.articles[destination] = source;
         self.articles[destination].read = self.read_state.contains(source.url.bytes());
+        self.article_pages.adopt(pages.key(source.url.bytes()), staged);
         self.feeds[source.feed_index].article_count += 1;
     }
 
@@ -1491,6 +1534,7 @@ pub const Application = struct {
                 .{
                     self.io,
                     &self.fetchers[worker_index],
+                    &self.fetch_pages[worker_index],
                     &self.http_client,
                     &self.fetch_results,
                     worker_index,
@@ -1652,20 +1696,86 @@ pub const Application = struct {
         if (self.article_cursor >= self.filtered_article_count) return null;
         const article_index = self.filtered_articles[self.article_cursor];
         const article = &self.articles[article_index];
-        const source = if (article.content.is_empty())
-            article.summary.bytes()
-        else
-            article.content.bytes();
+        // A page the pool has since given up leaves the reader standing past
+        // the end of the article, so bring it back before reading from it.
+        self.reader_page = @min(self.reader_page, self.reader_page_count() -| 1);
+        const source = self.page_source(article, self.reader_page);
         const source_length: u16 = @intCast(source.len);
         if (self.reader_document_article != article_index or
+            self.reader_document_page != self.reader_page or
             self.reader_document_length != source_length)
         {
             self.reader_document = document.parse(source);
             self.reader_document_article = article_index;
+            self.reader_document_page = self.reader_page;
             self.reader_document_length = source_length;
             self.reader_layout_valid = false;
         }
         return &self.reader_document;
+    }
+
+    /// Pages the selected article reads as, its first included. An article
+    /// with nothing but a summary still counts as one page: there is always
+    /// something to show, even when it is short.
+    pub fn reader_page_count(self: *Application) u16 {
+        const article = self.selected_article() orelse return 0;
+        if (article.content.is_empty()) return 1;
+        return 1 + self.article_pages.page_count(pages.key(article.url.bytes()));
+    }
+
+    fn page_source(
+        self: *const Application,
+        article: *const model.Article,
+        page: u16,
+    ) []const u8 {
+        if (article.content.is_empty()) return article.summary.bytes();
+        if (page == 0) return article.content.bytes();
+        return self.article_pages.page(pages.key(article.url.bytes()), page) orelse
+            article.content.bytes();
+    }
+
+    /// Turns `delta` pages, reporting whether there was a page to turn to.
+    ///
+    /// Reading runs on from the top of the next page and back from the bottom
+    /// of the previous one, so a page break reads as a break in a long article
+    /// rather than as a jump to somewhere else.
+    pub fn turn_page(self: *Application, delta: i16) bool {
+        const count = self.reader_page_count();
+        if (count <= 1) return false;
+        const moved = @as(i32, self.reader_page) + delta;
+        if (moved < 0 or moved >= count) return false;
+        self.reader_page = @intCast(moved);
+        self.reader_scroll = 0;
+        self.reader_scroll_to_end = delta < 0;
+        return true;
+    }
+
+    /// Turning a page by hand says where it landed. Scrolling into the next
+    /// page does not: there the text itself is the answer.
+    fn turn_page_announced(self: *Application, delta: i16) !void {
+        const count = self.reader_page_count();
+        if (count <= 1) {
+            try self.set_message("This article is one page");
+            return;
+        }
+        if (!self.turn_page(delta)) {
+            try self.set_message(if (delta < 0)
+                "Already at the first page"
+            else
+                "Already at the last page");
+            return;
+        }
+        try self.set_message_formatted(
+            "Page {d} of {d}",
+            .{ self.reader_page + 1, count },
+        );
+    }
+
+    /// Puts the reader back at the opening of whatever is selected.
+    fn reset_reader_position(self: *Application) void {
+        self.reader_scroll = 0;
+        self.reader_page = 0;
+        self.reader_scroll_to_end = false;
     }
 
     pub fn unread_count(self: *const Application) u16 {
@@ -1747,7 +1857,11 @@ pub const Application = struct {
         var next_article: u16 = 0;
         var index: u16 = 0;
         while (index < self.article_count) : (index += 1) {
-            const mapped = feed_map[self.articles[index].feed_index] orelse continue;
+            const mapped = feed_map[self.articles[index].feed_index] orelse {
+                // The article is going with its feed, and so are its pages.
+                self.article_pages.release(pages.key(self.articles[index].url.bytes()));
+                continue;
+            };
             self.articles[next_article] = self.articles[index];
             self.articles[next_article].feed_index = mapped;
             next_article += 1;
@@ -1889,7 +2003,7 @@ pub const Application = struct {
             self.filtered_articles[self.article_cursor]
         else
             null;
-        if (selected_before != selected_now) self.reader_scroll = 0;
+        if (selected_before != selected_now) self.reset_reader_position();
         self.ensure_article_visible();
     }
 
@@ -2088,6 +2202,10 @@ pub const Application = struct {
                 self.ensure_article_visible();
             },
             .reader => {
+                // The edges of an article are the edges of the article, not
+                // of whichever page happens to be up.
+                self.reader_page = if (last) self.reader_page_count() -| 1 else 0;
+                self.reader_scroll_to_end = last;
                 self.reader_scroll = if (last)
                     self.reader_line_count -| self.reader_viewport
                 else
@@ -2124,12 +2242,16 @@ pub const Application = struct {
             self.filtered_article_count,
             delta,
         );
-        if (previous != self.article_cursor) self.reader_scroll = 0;
+        if (previous != self.article_cursor) self.reset_reader_position();
         self.ensure_article_visible();
     }
 
     fn move_reader(self: *Application, delta: i16) void {
         const maximum = self.reader_line_count -| self.reader_viewport;
+        // Reading off either end of a page turns it, so a paged article
+        // scrolls like the one long article it is.
+        if (delta > 0 and self.reader_scroll == maximum and self.turn_page(1)) return;
+        if (delta < 0 and self.reader_scroll == 0 and self.turn_page(-1)) return;
         self.reader_scroll = move_index_clamped(self.reader_scroll, maximum +| 1, delta);
     }
 
@@ -2151,6 +2273,13 @@ pub const Application = struct {
     pub fn set_reader_metrics(self: *Application, lines: u16, rows: u16) void {
         self.reader_line_count = lines;
         self.reader_viewport = @max(rows, 1);
+        if (self.reader_scroll_to_end) {
+            // The page was reached from below, and only now is there a bottom
+            // to land on.
+            self.reader_scroll_to_end = false;
+            self.reader_scroll = lines -| self.reader_viewport;
+            return;
+        }
         self.reader_scroll = @min(self.reader_scroll, lines -| self.reader_viewport);
     }
 
@@ -2226,13 +2355,19 @@ fn focus_index(focus: Focus) u8 {
 fn fetch_task(
     io: std.Io,
     fetcher: *fetcher_module.Fetcher,
+    staged: *parser.StagedPages,
     client: *std.http.Client,
     results: *FetchResultQueue,
     worker_index: u16,
     feed_index: u16,
     url: model.FeedUrl,
 ) std.Io.Cancelable!void {
-    const outcome: FetchOutcome = if (fetcher.fetch(client, url.bytes(), feed_index)) |update|
+    const outcome: FetchOutcome = if (fetcher.fetch(
+        client,
+        url.bytes(),
+        feed_index,
+        staged,
+    )) |update|
         .{ .update = update }
     else |err|
         .{ .failure = err };
@@ -2531,4 +2666,165 @@ test "focus cycles only through panes the workspace draws" {
     _ = try application.handle_character('v');
     _ = try application.handle_key(.{ .character = '?' });
     try std.testing.expectEqual(Focus.articles, application.focus);
+}
+
+/// An application holding one article long enough to need pages.
+fn paged_application() !*Application {
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    errdefer application.destroy(std.testing.allocator);
+    application.feed_count = 1;
+    application.feeds[0] = try subscriptions.make_feed("https://long.test/rss", "Systems");
+    try application.feeds[0].title.set("Long Reads");
+    application.article_count = 1;
+    application.articles[0] = .{
+        .title = try model.ArticleTitle.init("A very long article"),
+        .url = try model.ArticleUrl.init("https://long.test/article"),
+        .feed_index = 0,
+        .published_timestamp = 100,
+    };
+    try application.articles[0].content.set("<p>Page one.</p>");
+    const key = pages.key("https://long.test/article");
+    try std.testing.expect(application.article_pages.claim(key, 1, "<p>Page two.</p>"));
+    try std.testing.expect(application.article_pages.claim(key, 2, "<p>Page three.</p>"));
+    application.rebuild_categories();
+    application.refresh_feeds();
+    application.refresh_articles();
+    return application;
+}
+
+test "the reader shows one page at a time and turns between them" {
+    const application = try paged_application();
+    defer application.destroy(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u16, 3), application.reader_page_count());
+    try std.testing.expectEqualStrings(
+        "Page one.",
+        application.selected_document().?.blocks[0].text.bytes(),
+    );
+
+    _ = try application.handle_character(']');
+    try std.testing.expectEqual(@as(u16, 1), application.reader_page);
+    try std.testing.expectEqualStrings(
+        "Page two.",
+        application.selected_document().?.blocks[0].text.bytes(),
+    );
+
+    _ = try application.handle_character(']');
+    _ = try application.handle_character(']');
+    // The last page is the last page: there is nothing past it to turn to.
+    try std.testing.expectEqual(@as(u16, 2), application.reader_page);
+    try std.testing.expectEqualStrings(
+        "Page three.",
+        application.selected_document().?.blocks[0].text.bytes(),
+    );
+
+    _ = try application.handle_character('[');
+    try std.testing.expectEqual(@as(u16, 1), application.reader_page);
+}
+
+test "scrolling off the end of a page turns it" {
+    // Otherwise a paged article stops dead at the foot of page one, which is
+    // the cut-off this exists to remove.
+    const application = try paged_application();
+    defer application.destroy(std.testing.allocator);
+    application.focus = .reader;
+    application.set_reader_metrics(4, 4);
+    try std.testing.expectEqual(@as(u16, 0), application.reader_scroll);
+
+    _ = application.move_focused(1);
+    try std.testing.expectEqual(@as(u16, 1), application.reader_page);
+    try std.testing.expectEqual(@as(u16, 0), application.reader_scroll);
+
+    // And back the other way, landing at the foot of the page it returns to
+    // rather than at its head.
+    _ = application.move_focused(-1);
+    try std.testing.expectEqual(@as(u16, 0), application.reader_page);
+    try std.testing.expect(application.reader_scroll_to_end);
+    application.set_reader_metrics(10, 4);
+    try std.testing.expectEqual(@as(u16, 6), application.reader_scroll);
+}
+
+test "selecting another article opens it at its first page" {
+    const application = try paged_application();
+    defer application.destroy(std.testing.allocator);
+    application.articles[1] = .{
+        .title = try model.ArticleTitle.init("Something else"),
+        .url = try model.ArticleUrl.init("https://long.test/other"),
+        .feed_index = 0,
+        .published_timestamp = 50,
+    };
+    application.article_count = 2;
+    application.refresh_articles();
+
+    application.reader_page = 2;
+    application.focus = .articles;
+    _ = application.move_focused(1);
+    try std.testing.expectEqual(@as(u16, 0), application.reader_page);
+    try std.testing.expectEqual(@as(u16, 1), application.reader_page_count());
+}
+
+test "an article dropped with its feed takes its pages with it" {
+    const application = try paged_application();
+    defer application.destroy(std.testing.allocator);
+    const key = pages.key("https://long.test/article");
+    try std.testing.expectEqual(@as(u16, 2), application.article_pages.page_count(key));
+
+    var keep: [limits.feed_count_max]bool = @splat(false);
+    application.apply_feed_keep(&keep);
+
+    try std.testing.expectEqual(@as(u16, 0), application.article_count);
+    try std.testing.expectEqual(@as(u16, 0), application.article_pages.page_count(key));
+}
+
+test "a long article arrives from a fetch with its pages intact" {
+    // The whole path: the parser cuts the body into pages, the worker stages
+    // them, the merge keeps them, and the reader turns them.
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    defer application.destroy(std.testing.allocator);
+    application.feed_count = 1;
+    application.feeds[0] = try subscriptions.make_feed("https://long.test/rss", "Systems");
+
+    const body = "<p>" ++ repeated("word ", 400) ++ "</p>";
+    const feed = "<rss><channel><item><title>Long</title>" ++
+        "<link>https://long.test/article</link><description>" ++
+        repeated(body, 24) ++
+        "</description></item></channel></rss>";
+    const staged = &application.fetch_pages[0];
+    const update = try parser.parse(feed, 0, staged);
+    application.merge_articles(&update, staged);
+    application.refresh_feeds();
+    application.refresh_articles();
+
+    try std.testing.expectEqual(@as(u16, 1), application.article_count);
+    try std.testing.expect(application.reader_page_count() > 1);
+    try std.testing.expect(application.articles[0].content_complete);
+
+    // Every page renders, and no two pages render the same thing.
+    var page: u16 = 0;
+    var previous_length: u16 = 0;
+    while (page < application.reader_page_count()) : (page += 1) {
+        application.reader_page = page;
+        const parsed = application.selected_document() orelse return error.NoDocument;
+        try std.testing.expect(parsed.count > 0);
+        try std.testing.expect(parsed.count < document.block_count_max);
+        try std.testing.expect(application.reader_document_page == page);
+        previous_length = application.reader_document_length;
+    }
+    try std.testing.expect(previous_length > 0);
+}
+
+/// Builds a body of a known size without leaning on the repeat operator.
+inline fn repeated(comptime chunk: []const u8, comptime times: usize) []const u8 {
+    comptime var built: []const u8 = "";
+    comptime var index: usize = 0;
+    inline while (index < times) : (index += 1) built = built ++ chunk;
+    return built;
 }

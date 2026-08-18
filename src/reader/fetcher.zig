@@ -30,9 +30,10 @@ pub const Fetcher = struct {
         client: *std.http.Client,
         url: []const u8,
         feed_index: u16,
+        staged: *parser.StagedPages,
     ) !parser.Update {
         if (std.mem.startsWith(u8, url, "file://")) {
-            return self.fetch_file(client.io, url["file://".len..], feed_index);
+            return self.fetch_file(client.io, url["file://".len..], feed_index, staged);
         }
         if (!std.mem.startsWith(u8, url, "http://") and
             !std.mem.startsWith(u8, url, "https://"))
@@ -47,7 +48,7 @@ pub const Fetcher = struct {
             .user_agent = "markix-rss/0.1",
         });
         if (result.status.class() != .success) return error.FeedRequestFailed;
-        return parser.parse(writer.buffered(), feed_index);
+        return parser.parse(writer.buffered(), feed_index, staged);
     }
 
     fn fetch_file(
@@ -55,9 +56,10 @@ pub const Fetcher = struct {
         io: std.Io,
         path: []const u8,
         feed_index: u16,
+        staged: *parser.StagedPages,
     ) !parser.Update {
         const bytes = try @import("data").cwd().readFile(io, path, &self.response);
         if (bytes.len == self.response.len) return error.FeedResponseTooLarge;
-        return parser.parse(bytes, feed_index);
+        return parser.parse(bytes, feed_index, staged);
     }
 };
