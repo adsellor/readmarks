@@ -14,6 +14,17 @@ pub const Rect = struct {
         return @intCast(@as(u32, self.x) + self.width);
     }
 
+    pub fn bottom(self: Rect) u16 {
+        return @intCast(@as(u32, self.y) + self.height);
+    }
+
+    pub fn overlaps(self: Rect, other: Rect) bool {
+        if (self.width == 0 or self.height == 0) return false;
+        if (other.width == 0 or other.height == 0) return false;
+        return self.x < other.right() and other.x < self.right() and
+            self.y < other.bottom() and other.y < self.bottom();
+    }
+
     pub fn inset(self: Rect, horizontal: u16, vertical: u16) Rect {
         const width = self.width -| @as(u16, horizontal *| 2);
         const height = self.height -| @as(u16, vertical *| 2);

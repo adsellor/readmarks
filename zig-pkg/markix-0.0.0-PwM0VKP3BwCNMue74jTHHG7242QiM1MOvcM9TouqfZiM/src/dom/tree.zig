@@ -176,20 +176,34 @@ pub const Tree = struct {
         };
     }
 
-    /// Expands dirt downward so a repainting background never leaves a stale
-    /// child behind. Children always have a higher index than their parent, so
-    /// a single ascending pass reaches arbitrarily deep nesting.
+    /// Expands dirt so that everything a repaint disturbs repaints with it.
     pub fn propagate_dirty(self: *Self) void {
+        std.debug.assert(self.node_count <= dom_nodes_max);
+        std.debug.assert(self.dirty_count <= self.node_count);
         var index: Self.NodeIndex = 0;
         while (index < self.node_count) : (index += 1) {
             const node = &self.nodes[index].element;
-            if (!node.dirty or !paints_over_children(node.kind)) continue;
-            var child = self.nodes[index].first_child;
-            while (child) |child_index| {
-                self.mark_dirty(child_index);
-                child = self.nodes[child_index].next_sibling;
+            if (!node.dirty) continue;
+            if (paints_over_children(node.kind)) {
+                var child = self.nodes[index].first_child;
+                while (child) |child_index| {
+                    std.debug.assert(child_index > index);
+                    self.mark_dirty(child_index);
+                    child = self.nodes[child_index].next_sibling;
+                }
+            }
+            const damaged = node.rect();
+            if (damaged.width == 0 or damaged.height == 0) continue;
+            var later: Self.NodeIndex = index + 1;
+            while (later < self.node_count) : (later += 1) {
+                std.debug.assert(later > index);
+                const candidate = &self.nodes[later].element;
+                if (candidate.dirty) continue;
+                if (!damaged.overlaps(candidate.rect())) continue;
+                self.mark_dirty(later);
             }
         }
+        std.debug.assert(self.dirty_count <= self.node_count);
     }
 
     pub fn clear_dirty(self: *Self) void {

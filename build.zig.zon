@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0-dev.1476+91a29d707",
     .dependencies = .{
         .markix = .{
-            .url = "git+https://codeberg.org/adsellor/markix#0cf7fe5ca0089df5ba61710ff758ed5298d28330",
-            .hash = "markix-0.0.0-PwM0VHbzBwDjJZJxIDyFkw7v1fCUTbeVLaxpokUrbB-v",
+            .url = "git+https://codeberg.org/adsellor/markix#36ba0f67c244af46ed668a75f620ab10536f5f3a",
+            .hash = "markix-0.0.0-PwM0VKP3BwCNMue74jTHHG7242QiM1MOvcM9TouqfZiM",
         },
     },
     .paths = .{
