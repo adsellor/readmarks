@@ -79,7 +79,7 @@ pub const table = [_]Action{
     },
     .{
         .label = "Prune unreachable feeds",
-        .detail = "Drop feeds the last full refresh failed",
+        .detail = "Drop failed feeds that have no articles",
         .run = run_prune,
     },
     .{

@@ -1429,16 +1429,16 @@ pub const Application = struct {
             try self.set_message("Run R and finish a full refresh before pruning");
             return;
         }
-        const failed = self.failed_feed_count();
+        const failed = self.prunable_feed_count();
         if (failed == 0) {
-            try self.set_message("No unreachable feeds found");
+            try self.set_message("No dead feeds: every failure has articles to keep");
             return;
         }
         self.feed_mode = .prune_confirm;
         var buffer: [128]u8 = undefined;
         const value = try std.fmt.bufPrint(
             &buffer,
-            "Press P again to prune {d} failed feeds; any other key cancels",
+            "Press P again to prune {d} dead feeds; any other key cancels",
             .{failed},
         );
         try self.set_message(value);
@@ -1449,12 +1449,12 @@ pub const Application = struct {
         var kept: u16 = 0;
         var index: u16 = 0;
         while (index < self.feed_count) : (index += 1) {
-            keep[index] = !self.feeds[index].failed;
+            keep[index] = !prunable(&self.feeds[index]);
             kept += @intFromBool(keep[index]);
         }
         if (kept == 0) {
             self.feed_mode = .browse;
-            try self.set_message("Prune refused: every feed failed");
+            try self.set_message("Prune refused: every feed is dead");
             return;
         }
         try self.persist_subscriptions(&keep, self.feed_count);
@@ -1463,7 +1463,7 @@ pub const Application = struct {
         self.feed_mode = .browse;
         try self.save_cache();
         var buffer: [64]u8 = undefined;
-        const value = try std.fmt.bufPrint(&buffer, "Pruned {d} failed feeds", .{removed});
+        const value = try std.fmt.bufPrint(&buffer, "Pruned {d} dead feeds", .{removed});
         try self.set_message(value);
     }
 
@@ -1807,11 +1807,22 @@ pub const Application = struct {
         return null;
     }
 
-    fn failed_feed_count(self: *const Application) u16 {
+    /// Whether pruning may drop this feed.
+    ///
+    /// A failed fetch says the feed was unreachable *this time*, which a
+    /// timeout, a 503 or a flaky connection all satisfy. A feed holding
+    /// articles has demonstrably worked, so one bad refresh is not grounds for
+    /// deleting the subscription and everything it ever delivered. Only a feed
+    /// that failed and has nothing to show for itself is genuinely prunable.
+    fn prunable(feed: *const model.Feed) bool {
+        return feed.failed and feed.article_count == 0;
+    }
+
+    fn prunable_feed_count(self: *const Application) u16 {
         var count: u16 = 0;
         var index: u16 = 0;
         while (index < self.feed_count) : (index += 1) {
-            count += @intFromBool(self.feeds[index].failed);
+            count += @intFromBool(prunable(&self.feeds[index]));
         }
         return count;
     }
@@ -2827,4 +2838,76 @@ inline fn repeated(comptime chunk: []const u8, comptime times: usize) []const u8
     comptime var index: usize = 0;
     inline while (index < times) : (index += 1) built = built ++ chunk;
     return built;
+}
+
+/// Points the application at a writable feed list, so a test can exercise the
+/// paths that persist one.
+fn use_testing_subscription_path(application: *Application) !void {
+    var buffer: [limits.path_bytes_max]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{
+        @import("data").paths.testing_paths.config.bytes(),
+        subscriptions.file_name,
+    });
+    try application.subscription_path.set(path);
+}
+
+test "pruning spares a failed feed that still has articles" {
+    // A timeout is not a dead feed. Dropping a subscription that has been
+    // delivering for months because one refresh missed loses the feed, every
+    // article it ever sent, and the read marks with them.
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    defer application.destroy(std.testing.allocator);
+    application.feed_count = 2;
+    application.feeds[0] = try subscriptions.make_feed("https://works.test/rss", "Systems");
+    application.feeds[1] = try subscriptions.make_feed("https://gone.test/rss", "Systems");
+    application.articles[0] = .{
+        .title = try model.ArticleTitle.init("Delivered earlier"),
+        .url = try model.ArticleUrl.init("https://works.test/one"),
+        .feed_index = 0,
+    };
+    application.article_count = 1;
+    application.hydrate_cached_articles();
+
+    // Both feeds failed the last refresh; only one has nothing to show for it.
+    application.feeds[0].failed = true;
+    application.feeds[1].failed = true;
+    application.full_refresh_completed = true;
+    try use_testing_subscription_path(application);
+
+    try std.testing.expectEqual(@as(u16, 1), application.prunable_feed_count());
+    try application.prune_failed_feeds();
+
+    try std.testing.expectEqual(@as(u16, 1), application.feed_count);
+    try std.testing.expectEqualStrings(
+        "https://works.test/rss",
+        application.feeds[0].url.bytes(),
+    );
+    try std.testing.expectEqual(@as(u16, 1), application.article_count);
+}
+
+test "pruning still drops a failed feed that never delivered" {
+    const application = try Application.create(
+        std.testing.allocator,
+        std.testing.io,
+        &@import("data").paths.testing_paths,
+    );
+    defer application.destroy(std.testing.allocator);
+    application.feed_count = 2;
+    application.feeds[0] = try subscriptions.make_feed("https://works.test/rss", "Systems");
+    application.feeds[1] = try subscriptions.make_feed("https://typo.test/rss", "Systems");
+    application.feeds[1].failed = true;
+    application.full_refresh_completed = true;
+    try use_testing_subscription_path(application);
+
+    try std.testing.expectEqual(@as(u16, 1), application.prunable_feed_count());
+    try application.prune_failed_feeds();
+    try std.testing.expectEqual(@as(u16, 1), application.feed_count);
+    try std.testing.expectEqualStrings(
+        "https://works.test/rss",
+        application.feeds[0].url.bytes(),
+    );
 }
