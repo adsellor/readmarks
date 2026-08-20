@@ -6,6 +6,7 @@ const theme = @import("theme.zig");
 const view = @import("view.zig");
 const data = @import("data");
 const import_command = @import("import_command.zig");
+const build_options = @import("build_options");
 
 const Context = struct {
     canvas: *terminal.TerminalCanvas,
@@ -63,6 +64,13 @@ fn command(init: std.process.Init, io: std.Io, paths: *const data.Paths) !bool {
         try import_command.run(init.gpa, io, paths, &arguments);
         return true;
     }
+    if (std.mem.eql(u8, name, "version") or
+        std.mem.eql(u8, name, "--version") or
+        std.mem.eql(u8, name, "-V"))
+    {
+        try write_version(io);
+        return true;
+    }
     if (std.mem.eql(u8, name, "help") or
         std.mem.eql(u8, name, "--help") or
         std.mem.eql(u8, name, "-h"))
@@ -77,6 +85,12 @@ fn command(init: std.process.Init, io: std.Io, paths: *const data.Paths) !bool {
     return error.Reported;
 }
 
+fn write_version(io: std.Io) !void {
+    try write_out(io, "readmarks ");
+    try write_out(io, build_options.version);
+    try write_out(io, "\n");
+}
+
 fn write_usage(io: std.Io, paths: *const data.Paths) !void {
     try write_out(io,
         \\readmarks -- a terminal feed reader and bookmarker
@@ -85,6 +99,7 @@ fn write_usage(io: std.Io, paths: *const data.Paths) !void {
         \\  readmarks                    open the reader
         \\  readmarks import <file>...   add feeds from another tool's list
         \\  readmarks help               show this
+        \\  readmarks version            print the version
         \\
         \\Import understands OPML, newsboat urls files, plain URL lists and
         \\readmarks feed lists, guessed from the file unless --format says

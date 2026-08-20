@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // The manifest is the one place the version is written down, so a
+    // release bump cannot leave the binary reporting the last one.
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+
     const markix_dep = b.dependency("markix", .{
         .target = target,
         .optimize = optimize,
@@ -18,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .strip = if (optimize == .debug) null else true,
     });
     root_module.addImport("markix", markix_dep.module("markix"));
+    root_module.addOptions("build_options", options);
 
     const data_module = b.addModule("data", .{
         .root_source_file = b.path("src/data.zig"),

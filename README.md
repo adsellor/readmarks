@@ -31,6 +31,7 @@ Requires Zig 0.17.0-dev (see `minimum_zig_version` in `build.zig.zon`).
     readmarks                    open the reader
     readmarks import <file>...   add feeds from another tool's list
     readmarks help               usage
+    readmarks version            print the version
 
 Import understands OPML, newsboat urls files, plain URL lists and readmarks
 feed lists. The format is guessed unless `--format` says otherwise:
