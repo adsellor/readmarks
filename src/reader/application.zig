@@ -2055,10 +2055,26 @@ pub const Application = struct {
         if (self.active_feed) |feed_index| {
             if (article.feed_index != feed_index) return false;
         }
-        return article.matches(
-            &self.feeds[article.feed_index],
-            self.search_query_for(.articles),
-        );
+        const query = self.search_query_for(.articles);
+        if (article.matches(&self.feeds[article.feed_index], query)) return true;
+        return self.pages_match(article, query);
+    }
+
+    /// Whether the article's later pages hold the query. The article itself
+    /// only carries its first page, so a search that stopped there stopped
+    /// covering most of a long article.
+    fn pages_match(
+        self: *const Application,
+        article: *const model.Article,
+        query: []const u8,
+    ) bool {
+        if (query.len == 0) return false;
+        const key = pages.key(article.url.bytes());
+        var sequence: u16 = 1;
+        while (self.article_pages.page(key, sequence)) |page| : (sequence += 1) {
+            if (model.contains_ignore_case(page, query)) return true;
+        }
+        return false;
     }
 
     pub fn select_scope(self: *Application, scope: Scope, category: []const u8) void {
@@ -2910,4 +2926,23 @@ test "pruning still drops a failed feed that never delivered" {
         "https://works.test/rss",
         application.feeds[0].url.bytes(),
     );
+}
+
+test "search reaches text on an article's later pages" {
+    // Paging moved most of a long article off the article itself. A search
+    // that only reads page one silently stops finding the rest of it.
+    const application = try paged_application();
+    defer application.destroy(std.testing.allocator);
+    const key = pages.key("https://long.test/article");
+    try std.testing.expect(application.article_pages.claim(
+        key,
+        3,
+        "<p>A quokka appears late in the article.</p>",
+    ));
+
+    try search_for(application, "quokka");
+    try std.testing.expectEqual(@as(u16, 1), application.filtered_article_count);
+
+    try search_for(application, "wombat");
+    try std.testing.expectEqual(@as(u16, 0), application.filtered_article_count);
 }
