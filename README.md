@@ -22,7 +22,6 @@ Requires Zig 0.17.0-dev (see `minimum_zig_version` in `build.zig.zon`).
     zig build run          # build and run
     zig build test         # unit tests
     zig build check        # compile, test and check formatting
-    zig build web          # wasm demo into zig-out/web
 
 `-Dno-llvm` builds with Zig's own backend.
 

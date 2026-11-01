@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const terminal = @import("markix").terminal;
+const markix = @import("markix");
+const display_mod = @import("ui/display.zig");
+const Display = display_mod.Display;
 const Application = @import("application.zig").Application;
 const theme = @import("theme.zig");
 const view = @import("view.zig");
@@ -9,7 +11,7 @@ const import_command = @import("import_command.zig");
 const build_options = @import("build_options");
 
 const Context = struct {
-    canvas: *terminal.TerminalCanvas,
+    display: *Display,
     application: *Application,
 };
 
@@ -121,32 +123,33 @@ fn write_out(io: std.Io, bytes: []const u8) !void {
 }
 
 fn run_reader(init: std.process.Init, io: std.Io, paths: *const data.Paths) !void {
-    var canvas = try terminal.TerminalCanvas.init_auto_size(init.gpa);
-    defer canvas.deinit();
-    try canvas.set_refresh_limit(120);
-    const graphics = terminal.query_graphics_capabilities(io) catch
-        terminal.GraphicsCapabilities{};
-    canvas.set_image_protocol(terminal.detect_image_protocol(
-        graphics.sixel,
-        graphics.kitty,
+    const size = try markix.terminal.get_terminal_size();
+    const capabilities = markix.terminal.query_graphics_capabilities(io) catch
+        markix.terminal.GraphicsCapabilities{};
+    const protocol = markix.terminal.graphics.detect(
+        capabilities,
         init.environ_map.get("MARKIX_IMAGE_PROTOCOL"),
-    ));
+    );
+    const display = try Display.create(
+        init.gpa,
+        std.math.clamp(@as(i32, size.width), 1, display_mod.columns_max),
+        std.math.clamp(@as(i32, size.height), 1, display_mod.rows_max),
+        protocol,
+    );
+    defer display.destroy(init.gpa);
+    std.debug.assert(display.width() > 0 and display.width() <= display_mod.columns_max);
+    std.debug.assert(display.height() > 0 and display.height() <= display_mod.rows_max);
 
     const application = try Application.create(init.gpa, io, paths);
     defer application.destroy(init.gpa);
     try application.load(paths);
-    var context = Context{ .canvas = &canvas, .application = application };
-    try terminal.run_event_loop(
-        io,
-        &canvas,
-        .{},
-        Context,
-        &context,
-        event_callback,
-    );
+    var context = Context{ .display = display, .application = application };
+    try markix.run_event_loop(io, display.backend(), .{}, Context, &context, event_callback);
 }
 
-fn event_callback(context: *Context, event: terminal.Event) !terminal.LoopAction {
+fn event_callback(context: *Context, event: markix.Event) !markix.LoopAction {
+    std.debug.assert(context.display.width() > 0);
+    std.debug.assert(context.display.height() > 0);
     return switch (event) {
         .key => |key| if (try context.application.handle_key(key))
             .redraw
@@ -158,7 +161,7 @@ fn event_callback(context: *Context, event: terminal.Event) !terminal.LoopAction
         else
             .wait,
         .frame => frame: {
-            try view.render(context.application, context.canvas);
+            try view.render(context.application, context.display);
             break :frame .wait;
         },
     };

@@ -13,8 +13,8 @@
 //! key that travels inside the article itself survives all of it.
 
 const std = @import("std");
-const document = @import("markix").document;
-const xml = @import("markix").xml;
+const document = @import("document.zig");
+const xml = @import("xml.zig");
 const limits = @import("limits.zig");
 const FixedText = @import("data").FixedText;
 

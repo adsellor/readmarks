@@ -1,48 +1,33 @@
-//! The command centre: a fuzzy prompt over everything an experience can do or
-//! show. One engine and one surface, configured by whoever mounts it, so `:`
-//! means the same thing in the reader as it does in the bookmarker.
-//!
-//! The host owns what a result *is*. This owns the prompt, the selection, the
-//! scrolling and the surface they are drawn on.
-
 const std = @import("std");
 const markix = @import("markix");
-const dom = markix.dom;
-const layout = markix.layout;
-const widgets = markix.widgets;
 const theme = @import("../theme.zig");
 const tokens = @import("tokens.zig");
+const fuzzy = @import("fuzzy.zig");
 const pane = @import("pane.zig");
+const node = @import("node.zig");
+const field = @import("field.zig");
+const header = @import("header.zig");
 
-const NodeIndex = dom.DomTree.NodeIndex;
-const LayoutElement = layout.LayoutElement;
-const Rect = layout.Rect;
+const Tree = node.Tree;
+const Index = node.Index;
+const Rect = node.Rect;
+const Key = markix.Key;
 
-/// Row the results start on: below the prompt and a blank row, and below the
-/// filter row and another blank row when the surface carries filters.
 pub const results_row: u16 = 2;
 pub const filtered_results_row: u16 = 4;
-const filter_row: u16 = 2;
-const filter_badge_width: u16 = 8;
+const filter_label_width: u16 = 8;
 
 pub fn first_result_row(filters: bool) u16 {
     return if (filters) filtered_results_row else results_row;
 }
 
-/// What a key did, so the host can refresh results or run the selection
-/// without the engine knowing what either means.
 pub const Outcome = enum {
-    /// Handled; nothing more to do.
     consumed,
-    /// The query changed; the host must refill the results.
     query_changed,
-    /// Run the selected result.
     activate,
     input_changed,
     submit,
-    /// Leave the command centre.
     close,
-    /// Leave the application.
     quit,
 };
 
@@ -55,19 +40,13 @@ pub fn Center(
 ) type {
     return struct {
         const Self = @This();
-        pub const Input = widgets.TextInput(query_bytes);
+        pub const Input = markix.widgets.TextInput(query_bytes);
         pub const result_capacity: u16 = capacity;
 
-        /// Whether the centre is up. Owned here rather than by the host, so
-        /// opening and closing it is one call and there is no second flag to
-        /// keep in step.
         open: bool = false,
         stage: Stage = .picking,
         input: Input = .{},
         results: [capacity]Result = undefined,
-        /// How well each result matched, parallel to `results`. Gathering is
-        /// done in whatever order the host walks its collections; ranking puts
-        /// the best match first regardless of which collection it came from.
         ranks: [capacity]u16 = undefined,
         order: [capacity]u16 = undefined,
         count: u16 = 0,
@@ -111,7 +90,6 @@ pub fn Center(
             return self.input.value();
         }
 
-        /// Starts a fresh pass of result gathering.
         pub fn reset_results(self: *Self) void {
             self.count = 0;
         }
@@ -126,12 +104,6 @@ pub fn Center(
             self.count += 1;
         }
 
-        /// Ranks what was gathered and puts the selection on the best match.
-        ///
-        /// The selection goes back to the top rather than staying where it
-        /// was: after typing, the row under the cursor is a different result
-        /// than it was a keystroke ago, and leaving the highlight on a stale
-        /// index is how a palette runs the wrong thing on Enter.
         pub fn finish_results(self: *Self) void {
             std.debug.assert(self.count <= capacity);
             self.rank_results();
@@ -142,8 +114,6 @@ pub fn Center(
             std.debug.assert(self.scroll == 0);
         }
 
-        /// Sorts by rank, keeping gather order among equals so an unranked
-        /// listing (the empty query) stays in the order the host built it.
         fn rank_results(self: *Self) void {
             if (self.count < 2) return;
             std.debug.assert(self.count <= capacity);
@@ -193,13 +163,13 @@ pub fn Center(
             }
         }
 
-        /// Applies a key against the caller's bindings. Anything the bindings
-        /// do not claim is text, and goes to the prompt.
         pub fn handle(
             self: *Self,
-            key: layout.input.Key,
+            key: Key,
             bindings: Bindings,
         ) !Outcome {
+            std.debug.assert(bindings.previous_control.len > 0);
+            std.debug.assert(self.count <= capacity);
             if (key == .control) {
                 const byte = key.control;
                 if (std.mem.indexOfScalar(u8, bindings.quit_control, byte) != null) {
@@ -235,35 +205,12 @@ pub fn Center(
     };
 }
 
-/// Mounted nodes of the command centre's surface.
-pub const Slot = struct {
-    mounted: bool = false,
-    /// Set when the surface floats over the workspace rather than filling a
-    /// pane slot, in which case it casts a shadow and owns its own rect.
-    floating: bool = false,
-    filters: bool = false,
-    panel: NodeIndex = 0,
-    shadow: NodeIndex = 0,
-    input: NodeIndex = 0,
-    placeholder: NodeIndex = 0,
-    prompt_width: u16 = 0,
-    filter_badge: NodeIndex = 0,
-    filter_items: NodeIndex = 0,
-    results: pane.Slot = .{},
-    rect: Rect = Rect.init(0, 0, 0, 0),
-    filters_rect: Rect = Rect.init(0, 0, 0, 0),
-};
-
-/// The scopes a filtered surface offers, and which one is active.
 pub const Filters = struct {
-    items: []const widgets.SegmentItem,
+    items: []const header.Segment,
     selected: u16,
     label: []const u8,
 };
 
-/// Every word on the surface. Deliberately without defaults: what the command
-/// centre is called, what it prompts with and what it says when it finds
-/// nothing are the caller's decisions, not this component's.
 pub const Config = struct {
     title: []const u8,
     meta: []const u8,
@@ -273,26 +220,16 @@ pub const Config = struct {
     filters: ?Filters = null,
 };
 
-/// Which keys drive the surface. Also without defaults: the caller owns the
-/// keymap, and both experiences pass the same one so the centre answers to the
-/// same keys wherever it is opened.
 pub const Bindings = struct {
-    /// Plain keys that step the selection back and forward.
-    previous: []const layout.input.Key,
-    next: []const layout.input.Key,
-    /// Control characters that step the selection.
+    previous: []const Key,
+    next: []const Key,
     previous_control: []const u8,
     next_control: []const u8,
-    activate: []const layout.input.Key,
-    close: []const layout.input.Key,
+    activate: []const Key,
+    close: []const Key,
     quit_control: []const u8,
 };
 
-/// How well `text` answers `query`, or null when it does not answer at all.
-///
-/// Ranked rather than merely matched because a subsequence match is very
-/// permissive: without this, typing an article's name puts an action whose
-/// letters happen to appear in order above the article itself.
 pub fn rank(text: []const u8, query: []const u8) ?u16 {
     std.debug.assert(text.len <= std.math.maxInt(u16));
     std.debug.assert(query.len <= std.math.maxInt(u16));
@@ -303,24 +240,19 @@ pub fn rank(text: []const u8, query: []const u8) ?u16 {
         return 900 -| @as(u16, @intCast(@min(text.len - query.len, 99)));
     }
     if (index_ignore_case(text, query)) |at| {
-        // A match at a word start reads as deliberate; one mid-word is weaker.
         const boundary = at == 0 or text[at - 1] == ' ' or text[at - 1] == '-';
         const base: u16 = if (boundary) 800 else 700;
         return base -| @as(u16, @intCast(@min(at, 99)));
     }
-    if (!markix.layout.fuzzy.matches(text, query)) return null;
-    // A scattered subsequence is the weakest kind of match; tighter ones
-    // (fewer characters skipped) still beat looser ones.
+    if (!fuzzy.matches(text, query)) return null;
     const spread = subsequence_spread(text, query) orelse return 400;
     return 500 -| @as(u16, @intCast(@min(spread, 99)));
 }
 
-/// The best rank across several fields, for a result that can match on more
-/// than one of them.
 pub fn rank_any(fields: []const []const u8, query: []const u8) ?u16 {
     var best: ?u16 = null;
-    for (fields) |field| {
-        const value = rank(field, query) orelse continue;
+    for (fields) |text| {
+        const value = rank(text, query) orelse continue;
         if (best == null or value > best.?) best = value;
     }
     return best;
@@ -343,9 +275,9 @@ fn index_ignore_case(text: []const u8, needle: []const u8) ?usize {
     return null;
 }
 
-/// Characters between the first and last matched position, beyond the query's
-/// own length: zero for a contiguous run, larger the more scattered the match.
 fn subsequence_spread(text: []const u8, query: []const u8) ?usize {
+    std.debug.assert(query.len > 0);
+    std.debug.assert(query.len <= text.len);
     var first: ?usize = null;
     var last: usize = 0;
     var index: usize = 0;
@@ -361,7 +293,7 @@ fn subsequence_spread(text: []const u8, query: []const u8) ?usize {
     return (last - start + 1) - query.len;
 }
 
-fn key_matches(key: layout.input.Key, candidates: []const layout.input.Key) bool {
+fn key_matches(key: Key, candidates: []const Key) bool {
     for (candidates) |candidate| {
         if (std.meta.activeTag(key) != std.meta.activeTag(candidate)) continue;
         return switch (key) {
@@ -373,208 +305,110 @@ fn key_matches(key: layout.input.Key, candidates: []const layout.input.Key) bool
     return false;
 }
 
-pub const MountOptions = struct {
-    prompt_width: u16 = 2,
-    /// Box to ask for. A placement is clipped to its parent, so asking for the
-    /// frame's width asks for all of whatever slot the surface is given.
-    width: u16,
-    rows: u16,
-    filters: bool = false,
-    /// Where to float, relative to the parent. Absent means fill the slot.
-    placement: ?Rect = null,
-};
-
-/// Rows of results a surface of this size can show.
-pub fn rows_for(rect: Rect, filters: bool) u16 {
-    std.debug.assert(tokens.command_list_visual.row_height > 0);
-    const inner = widgets.panel_content_rect(tokens.overlay_chrome, rect);
-    const results = inner.height -| first_result_row(filters);
-    return @min(
-        @max(@divFloor(results, tokens.command_list_visual.row_height), 1),
-        pane.rows_max,
-    );
-}
-
 pub fn rect_for(bounds: Rect) Rect {
     return tokens.overlay_rect(bounds, 84, 17);
 }
 
-pub fn mount(
-    tree: *dom.DomTree,
-    parent: NodeIndex,
-    options: MountOptions,
-) !Slot {
-    var slot = Slot{
-        .mounted = true,
-        .floating = options.placement != null,
-        .filters = options.filters,
-    };
-    if (options.placement) |rect| {
-        slot.shadow = try tree.append_child(parent, .{
-            .kind = .panel,
-            .props = .{ .panel = .{
-                .chrome = .{ .rail_width = 0, .content_padding_left = 0 },
-                .style = shadow_style(),
-            } },
-            .layout = LayoutElement.placed_free(
-                rect.x + 1,
-                rect.y + 1,
-                rect.width,
-                rect.height,
-            ),
-        });
-    }
-    slot.panel = try tree.append_child(parent, .{
-        .kind = .panel,
-        .props = .{ .panel = .{
-            .chrome = tokens.overlay_chrome,
-            .style = theme.command_panel,
-        } },
-        .layout = if (options.placement) |rect|
-            LayoutElement.placed_free(rect.x, rect.y, rect.width, rect.height)
-        else
-            LayoutElement.free(),
-        .focused = true,
-    });
-    slot.input = try tree.append_child(slot.panel, .{
-        .kind = .text_input,
-        .props = .{ .text_input = .{} },
-        .layout = LayoutElement.placed(0, 0, options.width, 1),
-    });
-    slot.prompt_width = options.prompt_width;
-    slot.placeholder = try tree.append_child(slot.panel, .{
-        .kind = .label,
-        .props = .{ .label = .{} },
-        .layout = LayoutElement.placed(
-            options.prompt_width + 1,
-            0,
-            options.width -| (options.prompt_width + 1),
-            1,
-        ),
-    });
-    if (options.filters) {
-        slot.filter_badge = try tree.append_child(slot.panel, .{
-            .kind = .badge,
-            .props = .{ .badge = .{} },
-            .layout = LayoutElement.placed(0, filter_row, filter_badge_width, 1),
-        });
-        slot.filter_items = try tree.append_child(slot.panel, .{
-            .kind = .segmented,
-            .props = .{ .segmented = .{} },
-            .layout = LayoutElement.placed(
-                filter_badge_width + 1,
-                filter_row,
-                options.width -| (filter_badge_width + 1),
-                1,
-            ),
-        });
-    }
-    slot.results = try pane.mount_list(
-        tree,
-        slot.panel,
-        Rect.init(
-            0,
-            first_result_row(options.filters),
-            options.width,
-            @max(options.rows * @as(u16, tokens.command_list_visual.row_height), 1),
-        ),
-        options.rows,
-        tokens.command_list_visual,
-        theme.command_panel,
-    );
-    return slot;
+pub fn rows_for(rect: Rect, filters: bool) u16 {
+    const visual = tokens.command_list_visual;
+    std.debug.assert(visual.row_height > 0);
+    const inner = tokens.content_rect(tokens.overlay_chrome, rect);
+    const results = @max(0, inner.height - first_result_row(filters));
+    const rows = @max(@divFloor(results, visual.row_height), 1);
+    return @intCast(@min(rows, pane.rows_max));
 }
 
-fn shadow_style() markix.Style {
-    var style = theme.panel_style;
-    style.background = theme.shadow;
-    return style;
+pub fn filters_rect(rect: Rect) Rect {
+    const inner = tokens.content_rect(tokens.overlay_chrome, rect);
+    const offset = filter_label_width + 1;
+    return Rect.init(inner.x + offset, inner.y + 2, @max(0, inner.width - offset), 1);
 }
 
-/// Writes the surface: its panel, shadow, filter row and prompt. The results
-/// are written separately, because the list underneath is sometimes the
-/// engine's own and sometimes the host's -- zen mode filters the collection in
-/// place rather than gathering a new one.
-pub fn update_surface(
-    tree: *dom.DomTree,
-    slot: *const Slot,
-    config: Config,
-    query: []const u8,
-    cursor: u16,
-) void {
-    if (!slot.mounted) return;
-    tree.set_props(slot.panel, .{ .panel = .{
-        .style = theme.command_panel,
-        .chrome = tokens.overlay_chrome,
-        .title = config.title,
-        .meta = config.meta,
-    } });
-    if (slot.floating) {
-        tree.set_props(slot.shadow, .{ .panel = .{
-            .style = shadow_style(),
-            .chrome = .{ .rail_width = 0, .content_padding_left = 0 },
-        } });
-    }
-    if (config.filters) |filters| update_filters(tree, slot, filters);
-    tree.set_focused(slot.input, true);
-    tree.set_props(slot.input, .{ .text_input = .{
-        .style = theme.command_field,
+pub fn results_rect(rect: Rect, filters: bool) Rect {
+    const inner = tokens.content_rect(tokens.overlay_chrome, rect);
+    const top = first_result_row(filters);
+    return Rect.init(inner.x, inner.y + top, inner.width, @max(0, inner.height - top));
+}
+
+pub const Surface = struct {
+    panel: pane.Panel,
+    results: Index,
+    width: i32,
+};
+
+pub fn surface(tree: *Tree, rect: Rect, config: Config, query: []const u8, cursor: u16) !Surface {
+    std.debug.assert(tree.len == 0);
+    std.debug.assert(cursor <= query.len);
+    const palette = theme.palette;
+    var frame = pane.frame_for(.command, true);
+    frame.chrome = tokens.overlay_chrome;
+    frame.title = config.title;
+    frame.meta = config.meta;
+    const panel = try pane.floating(tree, rect, frame);
+    const inner = tokens.content_rect(tokens.overlay_chrome, rect);
+    _ = try field.field(tree, panel.body, .{
         .prompt = config.prompt,
         .placeholder = config.placeholder,
         .value = query,
         .cursor = cursor,
-    } });
-    if (slot.placeholder != 0) {
-        var style = theme.command_field;
-        style.foreground = theme.muted;
-        tree.set_props(slot.placeholder, .{ .label = .{
-            .text = if (query.len == 0) config.placeholder else "",
-            .style = style,
-        } });
+        .look = field.command_look(),
+    }, inner.width);
+    _ = try node.spacer(tree, panel.body, node.grow, node.fixed(1));
+    if (config.filters) |filters| {
+        const strip = try node.line(tree, panel.body, .{});
+        try header.badge(tree, strip, filters.label, theme.chip(
+            palette.inverse_foreground,
+            palette.accent_cool,
+        ));
+        try node.run(tree, strip, " ", .{});
+        try header.segments(
+            tree,
+            strip,
+            filters.items,
+            filters.selected,
+            theme.chip(palette.inverse_foreground, palette.command),
+            .{ .foreground = palette.muted, .background = palette.panel, .dim = true },
+        );
+        _ = try node.spacer(tree, panel.body, node.grow, node.fixed(1));
     }
-    tree.set_focused(slot.results.list, true);
+    const results = try node.box(tree, panel.body, .{});
+    return .{ .panel = panel, .results = results, .width = inner.width };
 }
 
-/// Writes the whole surface from the engine's state. `host` supplies what a
-/// result reads as: `command_result_title`, `command_result_detail` and
-/// `command_result_marker`.
-pub fn update(
-    tree: *dom.DomTree,
-    slot: *const Slot,
+pub fn fill(
+    tree: *Tree,
+    into: Surface,
+    rows: u16,
     center: anytype,
     host: anytype,
-    config: Config,
-) void {
-    if (!slot.mounted) return;
-    update_surface(tree, slot, config, center.query(), center.input.cursor);
+    empty_text: []const u8,
+) !void {
+    std.debug.assert(rows <= pane.rows_max);
+    std.debug.assert(center.count <= @TypeOf(center.*).result_capacity);
     var highlight = center.query();
     var scan: u16 = 0;
-    while (scan < slot.results.row_count) : (scan += 1) {
-        const index = center.scroll + scan;
-        if (index >= center.count) break;
-        if (pane.is_ascii(host.command_result_title(center.results[index]))) continue;
+    while (scan < rows and center.scroll + scan < center.count) : (scan += 1) {
+        const title = host.command_result_title(center.results[center.scroll + scan]);
+        if (pane.is_ascii(title)) continue;
         highlight = "";
         break;
     }
-    pane.update_list(tree, &slot.results, .{
+    const list = pane.List{
         .role = .command,
         .focused = true,
-        .empty_text = config.empty_text,
+        .empty_text = empty_text,
         .highlight = highlight,
         .visual = tokens.command_list_visual,
         .item_count = center.count,
         .scroll = center.scroll,
         .selected = center.selected,
-    });
+    };
+    if (center.count == 0) return pane.empty(tree, into.results, list);
     var row: u16 = 0;
-    while (row < slot.results.row_count) : (row += 1) {
+    while (row < rows and center.scroll + row < center.count) : (row += 1) {
         const index = center.scroll + row;
-        if (index >= center.count) {
-            pane.set_row(tree, &slot.results, row, null, false);
-            continue;
-        }
         const result = center.results[index];
-        pane.set_row(tree, &slot.results, row, .{
+        try pane.item(tree, into.results, list, into.width, .{
             .title = host.command_result_title(result),
             .subtitle = host.command_result_detail(result),
             .marker = host.command_result_marker(result),
@@ -582,61 +416,16 @@ pub fn update(
     }
 }
 
-fn update_filters(tree: *dom.DomTree, slot: *const Slot, filters: Filters) void {
-    if (slot.filter_items == 0) return;
-    tree.set_props(slot.filter_badge, .{ .badge = .{
-        .text = filters.label,
-        .style = .{
-            .foreground = theme.inverse_foreground,
-            .background = theme.accent_cool,
-            .attributes = .{ .bold = true },
-            .padding = 1,
-        },
-    } });
-    tree.set_props(slot.filter_items, .{ .segmented = .{
-        .active_style = .{
-            .foreground = theme.inverse_foreground,
-            .background = theme.command,
-            .attributes = .{ .bold = true },
-        },
-        .idle_style = .{
-            .foreground = theme.muted,
-            .background = theme.command_panel.background,
-            .attributes = .{ .dim = true },
-        },
-        .gap = 1,
-        .items = filters.items,
-        .selected = filters.selected,
-    } });
-}
-
-pub fn capture_rects(tree: *dom.DomTree, slot: *Slot) void {
-    if (!slot.mounted) return;
-    pane.capture_rects(tree, &slot.results);
-    if (tree.get(slot.panel)) |node| slot.rect = node.rect();
-    if (slot.filter_items != 0) {
-        if (tree.get(slot.filter_items)) |node| slot.filters_rect = node.rect();
-    }
-}
-
-/// Where each filter badge landed, walking the segmented widget's own maths so
-/// a hit box is the badge the user sees.
-pub fn filter_hit_boxes(
-    slot: *const Slot,
-    items: []const widgets.SegmentItem,
-    out: []Rect,
-) u8 {
-    if (slot.filter_items == 0) return 0;
-    const rect = slot.filters_rect;
-    var column: u16 = 0;
+pub fn filter_hit_boxes(rect: Rect, items: []const header.Segment, out: []Rect) u8 {
+    std.debug.assert(items.len <= std.math.maxInt(u8));
+    std.debug.assert(out.len <= std.math.maxInt(u8));
+    var column: i32 = 0;
     var index: u8 = 0;
     while (index < items.len and index < out.len) : (index += 1) {
         if (column >= rect.width) break;
-        const available = rect.width - column;
-        const width = @min(@as(u16, @intCast(items[index].label.len + 2)), available);
+        const width = @min(node.columns(items[index].label) + 2, rect.width - column);
         out[index] = Rect.init(rect.x + column, rect.y, width, 1);
-        column += width;
-        if (column < rect.width) column += 1;
+        column += width + 1;
     }
     return index;
 }
@@ -644,7 +433,6 @@ pub fn filter_hit_boxes(
 const TestResult = struct { index: u16 };
 const test_bindings = @import("../command.zig").bindings;
 const TestCenter = Center(TestResult, 8, 32);
-
 test "the centre moves, wraps its viewport and reports what a key meant" {
     var center = TestCenter{};
     center.begin();
@@ -660,7 +448,6 @@ test "the centre moves, wraps its viewport and reports what a key meant" {
         try center.handle(.{ .control = 'n' }, test_bindings),
     );
     try std.testing.expectEqual(@as(u16, 2), center.selected);
-    // The window followed the selection rather than the selection leaving it.
     try std.testing.expectEqual(@as(u16, 1), center.scroll);
     try std.testing.expectEqual(Outcome.activate, try center.handle(.enter, test_bindings));
     try std.testing.expectEqual(Outcome.close, try center.handle(.escape, test_bindings));
@@ -693,7 +480,6 @@ test "fewer results than the selection pulls it back into range" {
 }
 
 test "ranking puts the tightest match first" {
-    // Exact beats prefix beats word-start beats mid-word beats scattered.
     const exact = rank("Unread", "Unread").?;
     const prefix = rank("Unread articles", "Unread").?;
     const word = rank("Show Unread", "Unread").?;
@@ -744,8 +530,6 @@ test "a new query puts the selection back on the best match" {
     center.move(3);
     try std.testing.expectEqual(@as(u16, 3), center.selected);
 
-    // Typing gathers a fresh set; leaving the highlight on row 3 would run
-    // whatever now happens to sit there.
     center.reset_results();
     index = 0;
     while (index < 6) : (index += 1) center.append(.{ .index = 100 + index }, 0);
@@ -756,10 +540,14 @@ test "a new query puts the selection back on the best match" {
 }
 
 test "a match stays legible on the row it is selected on" {
-    // The match runs are painted in `command` on top of the selected row's
-    // background; if the two were the same colour the match would vanish
-    // exactly when the user moved onto it.
-    try std.testing.expect(
-        !theme.command_panel.selected_background.equals(theme.command),
-    );
+    try std.testing.expect(!pane.Role.command.selection(true).eql(theme.palette.command));
+}
+
+test "filter hit boxes follow the badges they cover" {
+    const items = [_]header.Segment{ .{ .label = "All" }, .{ .label = "Unread" } };
+    var boxes: [4]Rect = undefined;
+    const count = filter_hit_boxes(Rect.init(10, 4, 40, 1), &items, &boxes);
+    try std.testing.expectEqual(@as(u8, 2), count);
+    try std.testing.expectEqual(Rect.init(10, 4, 5, 1), boxes[0]);
+    try std.testing.expectEqual(Rect.init(16, 4, 8, 1), boxes[1]);
 }

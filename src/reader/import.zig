@@ -1,5 +1,5 @@
 const std = @import("std");
-const xml = @import("markix").xml;
+const xml = @import("xml.zig");
 const limits = @import("limits.zig");
 const model = @import("model.zig");
 const subscriptions = @import("subscriptions.zig");

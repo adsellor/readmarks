@@ -1,7 +1,6 @@
 const std = @import("std");
-const terminal = @import("markix").terminal;
-const layout = @import("markix").layout;
-const document = @import("markix").document;
+const markix = @import("markix");
+const document = @import("document.zig");
 const bookmarks = @import("data").bookmarks;
 const bookmark_limits = @import("data").limits;
 const data_paths = @import("data").paths;
@@ -19,11 +18,12 @@ const subscriptions = @import("subscriptions.zig");
 const transport_module = @import("transport.zig");
 
 const backend = transport_module.backend;
+const Rect = @import("../ui/geometry.zig").Rect;
 
 const Message = FixedText(192);
-const SearchInput = terminal.widgets.TextInput(limits.search_bytes_max);
-const FeedUrlInput = terminal.widgets.TextInput(limits.article_url_bytes_max);
-const FeedCategoryInput = terminal.widgets.TextInput(limits.category_name_bytes_max);
+const SearchInput = markix.widgets.TextInput(limits.search_bytes_max);
+const FeedUrlInput = markix.widgets.TextInput(limits.article_url_bytes_max);
+const FeedCategoryInput = markix.widgets.TextInput(limits.category_name_bytes_max);
 
 const command_center = @import("../ui/command_center.zig");
 const command_policy = @import("../command.zig");
@@ -68,10 +68,10 @@ pub const Zen = struct {
 const PaneGeometry = struct {
     /// The whole pane (chrome included), for hit-testing which pane a pointer
     /// press falls in.
-    bounds: layout.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// The list/documented area the rows are drawn in, for mapping a pointer
     /// row to an item. `width == 0` marks the pane as not drawn this frame.
-    list: layout.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    list: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     row_height: u8 = 1,
 };
 pub const FeedMode = enum { browse, add_url, add_category, remove_confirm, prune_confirm };
@@ -419,7 +419,7 @@ pub const Application = struct {
         }
     }
 
-    pub fn handle_key(self: *Application, key: layout.input.Key) !bool {
+    pub fn handle_key(self: *Application, key: markix.Key) !bool {
         if (self.help_open) return self.handle_help(key);
         if (self.command.is_open()) return self.handle_command(key);
         switch (key) {
@@ -451,7 +451,7 @@ pub const Application = struct {
         };
     }
 
-    fn handle_pointer(self: *Application, pointer: layout.input.Pointer) bool {
+    fn handle_pointer(self: *Application, pointer: markix.Pointer) bool {
         switch (pointer.action) {
             .press => {
                 switch (pointer.button) {
@@ -505,7 +505,7 @@ pub const Application = struct {
     /// Which pane the pointer falls in, or null when it lands outside every
     /// pane drawn this frame. Reader fullscreen fills the surface, so the
     /// other panes must have stale geometry cleared each render.
-    fn pane_at(self: *const Application, pointer: layout.input.Pointer) ?Focus {
+    fn pane_at(self: *const Application, pointer: markix.Pointer) ?Focus {
         const panes = [_]Focus{ .categories, .feeds, .articles, .reader };
         for (panes) |focus| {
             const bounds = self.pane_geometry[focus_index(focus)].bounds;
@@ -523,7 +523,7 @@ pub const Application = struct {
 
     /// Maps the pointer to the item row of a pane and selects it. Returns
     /// false when the pointer is not over the pane's list area.
-    fn select_at(self: *Application, focus: Focus, pointer: layout.input.Pointer) bool {
+    fn select_at(self: *Application, focus: Focus, pointer: markix.Pointer) bool {
         const geometry = self.pane_geometry[focus_index(focus)];
         if (pointer.y < geometry.list.y) return false;
         const row = @as(u16, pointer.y - geometry.list.y);
@@ -579,7 +579,7 @@ pub const Application = struct {
         }
     }
 
-    fn handle_help(self: *Application, key: layout.input.Key) bool {
+    fn handle_help(self: *Application, key: markix.Key) bool {
         switch (key) {
             .escape => self.help_open = false,
             .character => |byte| if (byte == '?' or byte == 'q') {
@@ -591,7 +591,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_command(self: *Application, key: layout.input.Key) !bool {
+    fn handle_command(self: *Application, key: markix.Key) !bool {
         switch (try self.command.handle(key, command_policy.bindings)) {
             .quit => return false,
             .close => try self.cancel_command(),
@@ -885,7 +885,7 @@ pub const Application = struct {
 
     /// The finder over zen mode narrows the article list in place, so it drives
     /// the same selection the list behind it shows.
-    fn handle_zen_search(self: *Application, key: layout.input.Key) !bool {
+    fn handle_zen_search(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .escape => {
                 self.search.clear();
@@ -951,7 +951,7 @@ pub const Application = struct {
         try self.set_message("Zen mode");
     }
 
-    fn handle_feed_mode(self: *Application, key: layout.input.Key) !bool {
+    fn handle_feed_mode(self: *Application, key: markix.Key) !bool {
         return switch (self.feed_mode) {
             .browse => true,
             .add_url, .add_category => self.handle_add_feed(key),
@@ -960,7 +960,7 @@ pub const Application = struct {
         };
     }
 
-    fn handle_add_feed(self: *Application, key: layout.input.Key) !bool {
+    fn handle_add_feed(self: *Application, key: markix.Key) !bool {
         if (key == .escape) {
             self.feed_mode = .browse;
             try self.set_message("Feed add cancelled");
@@ -984,7 +984,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_remove_confirm(self: *Application, key: layout.input.Key) !bool {
+    fn handle_remove_confirm(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .character => |byte| if (byte == 'd') {
                 try self.remove_selected_feed();
@@ -997,7 +997,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_prune_confirm(self: *Application, key: layout.input.Key) !bool {
+    fn handle_prune_confirm(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .character => |byte| if (byte == 'P') {
                 try self.prune_failed_feeds();
@@ -1033,7 +1033,7 @@ pub const Application = struct {
         };
     }
 
-    fn handle_search(self: *Application, key: layout.input.Key) !bool {
+    fn handle_search(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .escape => {
                 self.search.clear();
@@ -2314,11 +2314,11 @@ pub const Application = struct {
         self.pane_geometry = @splat(.{});
     }
 
-    pub fn set_pane_bounds(self: *Application, focus: Focus, rect: layout.Rect) void {
+    pub fn set_pane_bounds(self: *Application, focus: Focus, rect: Rect) void {
         self.pane_geometry[focus_index(focus)].bounds = rect;
     }
 
-    pub fn set_pane_list(self: *Application, focus: Focus, rect: layout.Rect, row_height: u8) void {
+    pub fn set_pane_list(self: *Application, focus: Focus, rect: Rect, row_height: u8) void {
         const geometry = &self.pane_geometry[focus_index(focus)];
         geometry.list = rect;
         geometry.row_height = row_height;

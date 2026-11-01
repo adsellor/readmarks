@@ -1,5 +1,5 @@
 const std = @import("std");
-const document = @import("markix").document;
+const document = @import("document.zig");
 const limits = @import("limits.zig");
 const model = @import("model.zig");
 const pages = @import("pages.zig");

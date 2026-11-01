@@ -1,50 +1,10 @@
 const std = @import("std");
-const markix = @import("markix");
-const terminal = markix.terminal;
-const theme = @import("../theme.zig");
 const dom_view = @import("dom_view.zig");
+const Display = @import("../ui/display.zig").Display;
 
-const Surface = terminal.Surface;
-
-pub fn render(application: anytype, canvas: *terminal.TerminalCanvas) !void {
-    const surface = Surface{ .canvas = canvas };
-    const bounds = surface.bounds();
-    const view = &application.dom_view;
-    view.observe_canvas(canvas.width, canvas.height);
-
-    const full = try dom_view.sync(view, application, bounds);
-    var renderer = markix.render.TerminalRenderer.init(canvas, theme.background);
-    renderer.begin();
-    // Gaps between panes belong to no node, so one clear on rebuild covers
-    // them without touching the panes on steady-state frames.
-    if (full) canvas.clear_rect(bounds, theme.background);
-    try renderer.paint_tree(&view.tree);
-    view.last_painted = renderer.painted;
-
-    dom_view.register_geometry(view, application);
-    try register_selection(surface, view);
-}
-
-/// Marks the regions text can be selected in. Frame state, so it is registered
-/// every frame including one on which nothing repainted.
-fn register_selection(surface: Surface, view: *dom_view.View) !void {
-    const regions = view.regions;
-    try mark(surface, regions.categories, theme.selection_browse);
-    try mark(surface, regions.feeds, theme.selection_browse);
-    try mark(surface, regions.articles, theme.selection_bookmarks);
-    try mark(surface, regions.document, theme.selection_preview);
-    try mark(surface, regions.finder_results, theme.selection_command);
-    try mark(surface, regions.command_results, theme.selection_command);
-}
-
-fn mark(
-    surface: Surface,
-    region: ?markix.Rect,
-    style: markix.TextSelectionStyle,
-) !void {
-    const rect = region orelse return;
-    if (rect.width == 0 or rect.height == 0) return;
-    try surface.selectable(rect, style);
+pub fn render(application: anytype, display: *Display) !void {
+    try dom_view.sync(&application.dom_view, application, display);
+    display.present();
 }
 
 fn seeded_application() !*@import("application.zig").Application {
@@ -83,62 +43,50 @@ fn seeded_application() !*@import("application.zig").Application {
     application.rebuild_categories();
     application.refresh_feeds();
     application.refresh_articles();
+    std.debug.assert(application.feed_count == 2);
+    std.debug.assert(application.article_count == titles.len);
     return application;
-}
-
-fn canvas_has_text(canvas: *const terminal.TerminalCanvas, text: []const u8) bool {
-    var y: u16 = 0;
-    while (y < @divFloor(canvas.height + 1, 2)) : (y += 1) {
-        var x: u16 = 0;
-        while (x < canvas.width) : (x += 1) {
-            const entry = canvas.text_at(x, y) orelse continue;
-            if (std.mem.eql(u8, entry.bytes(), text)) return true;
-        }
-    }
-    return false;
 }
 
 test "the workspace renders its panes through the dom tree" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "CATEGORIES"));
-    try std.testing.expect(canvas_has_text(&canvas, "FEEDS"));
-    try std.testing.expect(canvas_has_text(&canvas, "ARTICLES"));
-    try std.testing.expect(canvas_has_text(&canvas, "READER"));
-    try std.testing.expect(canvas_has_text(&canvas, "Tiger Style"));
-    try std.testing.expect(canvas_has_text(&canvas, "Tiger Beetle"));
+    try render(application, display);
+    try std.testing.expect(display.shows("CATEGORIES"));
+    try std.testing.expect(display.shows("FEEDS"));
+    try std.testing.expect(display.shows("ARTICLES"));
+    try std.testing.expect(display.shows("READER"));
+    try std.testing.expect(display.shows("Tiger Style"));
+    try std.testing.expect(display.shows("Tiger Beetle"));
 }
 
 test "the header carries the same tab bar the bookmarker has" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "All articles"));
-    try std.testing.expect(canvas_has_text(&canvas, "Categories"));
-    try std.testing.expect(canvas_has_text(&canvas, "Articles"));
-    // And the status line advertises the two keys that are true everywhere.
-    try std.testing.expect(canvas_has_text(&canvas, "ctrl-u"));
-    try std.testing.expect(canvas_has_text(&canvas, "switch"));
+    try render(application, display);
+    try std.testing.expect(display.shows("All articles"));
+    try std.testing.expect(display.shows("Categories"));
+    try std.testing.expect(display.shows("Articles"));
+    try std.testing.expect(display.shows("ctrl-u"));
+    try std.testing.expect(display.shows("switch"));
 }
 
 test "the command centre opens over the reader" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = ':' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
+    try render(application, display);
+    try std.testing.expect(display.shows("COMMAND CENTRE"));
     try std.testing.expectEqual(@as(u16, 0), application.command.count);
-    canvas.commit_frame();
 
     for ("> refresh") |byte| _ = try application.handle_key(.{ .character = byte });
     try std.testing.expect(application.command.count > 0);
@@ -150,9 +98,8 @@ test "the command centre opens over the reader" {
         _ = try application.handle_key(.backspace);
     }
 
-    // Typing brings the collection in, ranked, with the best match selected.
     for ("zig re") |byte| _ = try application.handle_key(.{ .character = byte });
-    try render(application, &canvas);
+    try render(application, display);
     try std.testing.expectEqual(
         @as(u16, 1),
         application.command.selected_result().?.article,
@@ -169,8 +116,6 @@ test "a feed's name does not drag its articles into the results" {
 
     _ = try application.handle_key(.{ .character = ':' });
     for ("tiger beetle") |byte| _ = try application.handle_key(.{ .character = byte });
-    // The feed itself, and nothing else: matching articles against their feed
-    // listed every article of that feed beside it.
     try std.testing.expectEqual(@as(u16, 1), application.command.count);
     try std.testing.expect(application.command.results[0] == .feed);
 }
@@ -178,105 +123,97 @@ test "a feed's name does not drag its articles into the results" {
 test "ctrl-p opens the same command centre" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .control = 'p' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "COMMAND CENTRE"));
+    try render(application, display);
+    try std.testing.expect(display.shows("COMMAND CENTRE"));
 }
 
 test "zen mode shows the articles alone and finds within them" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = 'z' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "ZEN LIBRARY"));
-    try std.testing.expect(!canvas_has_text(&canvas, "CATEGORIES"));
-    canvas.commit_frame();
+    try render(application, display);
+    try std.testing.expect(display.shows("ZEN LIBRARY"));
+    try std.testing.expect(!display.shows("CATEGORIES"));
 
     _ = try application.handle_key(.{ .character = '/' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "FIND ARTICLES"));
-    try std.testing.expect(canvas_has_text(&canvas, "FILTER"));
+    try render(application, display);
+    try std.testing.expect(display.shows("FIND ARTICLES"));
+    try std.testing.expect(display.shows("FILTER"));
 }
 
 test "the help sheet reads from the shared keymap" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 80);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 40, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = '?' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "KEYBOARD HELP"));
-    try std.testing.expect(canvas_has_text(&canvas, "command centre"));
-    try std.testing.expect(canvas_has_text(&canvas, "reader / bookmarks"));
-    // And the reader's own keys, after the shared ones.
-    try std.testing.expect(canvas_has_text(&canvas, "full-screen reader"));
+    try render(application, display);
+    try std.testing.expect(display.shows("KEYBOARD HELP"));
+    try std.testing.expect(display.shows("command centre"));
+    try std.testing.expect(display.shows("reader / bookmarks"));
+    try std.testing.expect(display.shows("full-screen reader"));
 }
 
 test "the document renders the article body" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = 'v' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "Reliable systems software."));
+    try render(application, display);
+    try std.testing.expect(display.shows("Reliable systems software."));
 }
 
 test "search narrows the list as it is typed" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = '/' });
     _ = try application.handle_key(.{ .character = 'Z' });
     _ = try application.handle_key(.{ .character = 'i' });
     _ = try application.handle_key(.{ .character = 'g' });
-    // No Enter: the filter is already applied.
     try std.testing.expectEqual(@as(u16, 1), application.filtered_article_count);
-    try render(application, &canvas);
-    // The surviving row's feed is drawn. Its title is split into runs by the
-    // match highlight, so it is the subtitle that compares whole; the article
-    // that no longer matches is gone from the list entirely.
-    try std.testing.expect(canvas_has_text(&canvas, "Zig News"));
-    try std.testing.expect(!canvas_has_text(&canvas, "Tiger Style"));
+    try render(application, display);
+    try std.testing.expect(display.shows("Zig News"));
+    try std.testing.expect(!display.shows("Tiger Style"));
 }
 
 test "a steady frame repaints nothing and keeps its panes" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    canvas.commit_frame();
-    try render(application, &canvas);
-    try std.testing.expectEqual(@as(u16, 0), application.dom_view.last_painted);
-    try std.testing.expect(canvas_has_text(&canvas, "Tiger Style"));
-    try std.testing.expect(canvas_has_text(&canvas, "ARTICLES"));
+    try render(application, display);
+    try render(application, display);
+    try std.testing.expectEqual(@as(i32, 0), display.painted_area());
+    try std.testing.expect(display.shows("Tiger Style"));
+    try std.testing.expect(display.shows("ARTICLES"));
 }
 
 test "moving the article cursor repaints less than a full frame" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    const full_frame = application.dom_view.last_painted;
-    canvas.commit_frame();
+    try render(application, display);
+    const full_frame = display.painted_area();
 
     _ = try application.handle_key(.{ .character = 'j' });
-    try render(application, &canvas);
-    const moved = application.dom_view.last_painted;
+    try render(application, display);
+    const moved = display.painted_area();
     try std.testing.expect(moved > 0);
     try std.testing.expect(moved < full_frame);
 }
@@ -284,19 +221,16 @@ test "moving the article cursor repaints less than a full frame" {
 test "narrow and medium widths still render" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
-    canvas.resizable = true;
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    canvas.commit_frame();
-    try canvas.resize(90, 40);
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "ARTICLES"));
-    canvas.commit_frame();
-    try canvas.resize(50, 30);
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "ARTICLES"));
+    try render(application, display);
+    display.resize(90, 20);
+    try render(application, display);
+    try std.testing.expect(display.shows("ARTICLES"));
+    display.resize(50, 15);
+    try render(application, display);
+    try std.testing.expect(display.shows("ARTICLES"));
 }
 
 test "M marks only what the current scope is showing" {
@@ -304,13 +238,11 @@ test "M marks only what the current scope is showing" {
     defer application.destroy(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 2), application.unread_count());
 
-    // Focus one feed, so the list shows that feed's articles alone.
     application.active_feed = 0;
     application.refresh_articles();
     try std.testing.expectEqual(@as(u16, 1), application.filtered_article_count);
 
     _ = try application.handle_key(.{ .character = 'M' });
-    // The focused feed is cleared; the other feed's article is untouched.
     try std.testing.expectEqual(@as(u16, 1), application.unread_count());
     try std.testing.expectEqual(@as(u16, 0), application.feed_unread_count(0));
     try std.testing.expectEqual(@as(u16, 1), application.feed_unread_count(1));
@@ -322,7 +254,6 @@ test "M with no feed focused clears everything shown" {
 
     _ = try application.handle_key(.{ .character = 'M' });
     try std.testing.expectEqual(@as(u16, 0), application.unread_count());
-    // Saying so, rather than leaving the reader to guess what happened.
     try std.testing.expect(std.mem.indexOf(
         u8,
         application.message.bytes(),
@@ -352,21 +283,18 @@ test "a search narrows what M clears" {
     try std.testing.expectEqual(@as(u16, 1), application.filtered_article_count);
 
     _ = try application.handle_key(.{ .character = 'M' });
-    // Only the article the search left visible was marked.
     try std.testing.expectEqual(@as(u16, 1), application.unread_count());
 }
 
 test "the command centre offers marking everything read" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = ':' });
     for ("> mark every") |byte| _ = try application.handle_key(.{ .character = byte });
-    try render(application, &canvas);
-    // The title is drawn in runs by the match highlight, so the result itself
-    // is what gets compared rather than the pixels.
+    try render(application, display);
     try std.testing.expectEqualStrings(
         "Mark everything shown as read",
         application.command_result_title(application.command.selected_result().?),
@@ -378,17 +306,17 @@ test "the command centre offers marking everything read" {
 test "adding a feed is the command centre asking for a URL" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 130, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 130, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
     application.subscription_path = try @import("model.zig").FeedUrl.init(
         "/tmp/readmarks-add-probe/feeds",
     );
     _ = try application.handle_key(.{ .character = 'a' });
     try std.testing.expect(application.command.is_collecting());
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "Add a feed"));
-    try std.testing.expect(!canvas_has_text(&canvas, "Refresh every feed"));
+    try render(application, display);
+    try std.testing.expect(display.shows("Add a feed"));
+    try std.testing.expect(!display.shows("Refresh every feed"));
 
     for ("https://example.com/rss.xml") |byte| {
         _ = try application.handle_key(.{ .character = byte });
@@ -474,17 +402,16 @@ test "a paste longer than the field fills it instead of crashing" {
 test "the prompt shows its placeholder until something is typed" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 40);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 120, 20, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = 'a' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "https://example.com/feed.xml"));
-    canvas.commit_frame();
+    try render(application, display);
+    try std.testing.expect(display.shows("https://example.com/feed.xml"));
 
     _ = try application.handle_key(.{ .character = 'h' });
-    try render(application, &canvas);
-    try std.testing.expect(!canvas_has_text(&canvas, "https://example.com/feed.xml"));
+    try render(application, display);
+    try std.testing.expect(!display.shows("https://example.com/feed.xml"));
 }
 
 test "searching in the command centre over a full workspace does not collide" {
@@ -502,16 +429,14 @@ test "searching in the command centre over a full workspace does not collide" {
     application.article_count = 40;
     application.refresh_articles();
 
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 120, 60);
-    defer canvas.deinit();
-    try render(application, &canvas);
-    canvas.commit_frame();
+    const display = try Display.create(std.testing.allocator, 120, 30, .none);
+    defer display.destroy(std.testing.allocator);
+    try render(application, display);
 
     _ = try application.handle_key(.{ .character = ':' });
     for ("zig") |byte| {
         _ = try application.handle_key(.{ .character = byte });
-        try render(application, &canvas);
-        canvas.commit_frame();
+        try render(application, display);
     }
     try std.testing.expect(application.command.count > 0);
 }
@@ -560,14 +485,13 @@ test "a non-ascii title does not crash the highlighted results" {
     };
     application.refresh_articles();
 
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 100, 40);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 100, 20, .none);
+    defer display.destroy(std.testing.allocator);
 
     _ = try application.handle_key(.{ .character = ':' });
     for ("ne") |byte| {
         _ = try application.handle_key(.{ .character = byte });
-        try render(application, &canvas);
-        canvas.commit_frame();
+        try render(application, display);
     }
     try std.testing.expect(application.command.count > 0);
 
@@ -575,30 +499,26 @@ test "a non-ascii title does not crash the highlighted results" {
     _ = try application.handle_key(.{ .character = '/' });
     for ("the") |byte| {
         _ = try application.handle_key(.{ .character = byte });
-        try render(application, &canvas);
-        canvas.commit_frame();
+        try render(application, display);
     }
 }
 
 test "the help sheet covers what it opens over" {
     const application = try seeded_application();
     defer application.destroy(std.testing.allocator);
-    var canvas = try terminal.TerminalCanvas.init(std.testing.allocator, 110, 60);
-    defer canvas.deinit();
+    const display = try Display.create(std.testing.allocator, 110, 30, .none);
+    defer display.destroy(std.testing.allocator);
 
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "Tiger Style"));
-    canvas.commit_frame();
+    try render(application, display);
+    try std.testing.expect(display.shows("Tiger Style"));
 
     _ = try application.handle_key(.{ .character = '?' });
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "KEYBOARD HELP"));
-    // Nothing from the workspace shows through the gaps in the sheet.
-    try std.testing.expect(!canvas_has_text(&canvas, "Tiger Style"));
-    try std.testing.expect(!canvas_has_text(&canvas, "ARTICLES"));
-    canvas.commit_frame();
+    try render(application, display);
+    try std.testing.expect(display.shows("KEYBOARD HELP"));
+    try std.testing.expect(!display.shows("Tiger Style"));
+    try std.testing.expect(!display.shows("Zig Release Notes"));
 
     _ = try application.handle_key(.escape);
-    try render(application, &canvas);
-    try std.testing.expect(canvas_has_text(&canvas, "Tiger Style"));
+    try render(application, display);
+    try std.testing.expect(display.shows("Tiger Style"));
 }

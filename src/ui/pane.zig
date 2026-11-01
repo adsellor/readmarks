@@ -1,77 +1,150 @@
-//! A titled panel wrapping a scrolling list. Categories, feeds, articles,
-//! scopes, bookmarks and command results are all this component with different
-//! configuration.
-
 const std = @import("std");
-const markix = @import("markix");
-const dom = markix.dom;
-const layout = markix.layout;
 const theme = @import("../theme.zig");
 const tokens = @import("tokens.zig");
+const fuzzy = @import("fuzzy.zig");
+const node = @import("node.zig");
 
-const NodeIndex = dom.DomTree.NodeIndex;
-const LayoutElement = layout.LayoutElement;
-const Rect = layout.Rect;
+const Tree = node.Tree;
+const Index = node.Index;
+const Color = node.Color;
+const Style = node.Style;
+const Rect = node.Rect;
+const Sizing = node.Sizing;
 
-/// Upper bound on rows mounted for one list. Rows are mounted only for the
-/// visible window, so this tracks terminal height rather than collection size.
 pub const rows_max: u16 = 64;
+const title_bytes_max: usize = 512;
 
-/// What a pane holds, which is what decides its accent. The role is the whole
-/// of the colour decision: a pane that narrows a collection looks the same in
-/// the reader as it does in the bookmarker.
 pub const Role = enum {
-    /// Scopes, categories, feeds: the things that narrow a collection.
     filter,
-    /// Articles, bookmarks: the collection itself.
     collection,
-    /// The reader, the preview: the document.
     document,
-    /// The command centre and its finder.
     command,
 
-    pub fn accent(self: Role) markix.Color {
+    pub fn accent(self: Role) Color {
         return switch (self) {
-            .filter => theme.accent_cool,
-            .collection => theme.accent_warm,
-            .document => theme.accent,
-            .command => theme.command,
+            .filter => theme.palette.accent_cool,
+            .collection => theme.palette.accent_warm,
+            .document => theme.palette.accent,
+            .command => theme.palette.command,
         };
     }
 
-    pub fn style(self: Role, focused: bool) markix.Style {
-        if (self == .command) return theme.command_panel;
-        return theme.pane_style(self.accent(), focused);
+    pub fn selection(self: Role, focused: bool) Color {
+        if (self == .command) return theme.palette.command_row;
+        return if (focused) theme.palette.selection else theme.palette.line;
     }
 };
 
-/// Mounted nodes. Rows occupy `row_count` consecutive indices from `first_row`.
-pub const Slot = struct {
-    mounted: bool = false,
-    panel: NodeIndex = 0,
-    list: NodeIndex = 0,
-    first_row: NodeIndex = 0,
-    row_count: u16 = 0,
-    rect: Rect = Rect.init(0, 0, 0, 0),
-    inner: Rect = Rect.init(0, 0, 0, 0),
-};
-
-pub const Config = struct {
-    role: Role,
-    focused: bool = false,
+pub const Frame = struct {
+    chrome: tokens.Chrome = tokens.pane_chrome,
     title: []const u8 = "",
     meta: []const u8 = "",
+    rail: Color,
+    title_color: Color,
+    ground: Color,
+    header_ground: Color = .{},
+    width: Sizing = node.grow,
+    height: Sizing = node.grow,
+};
+
+pub fn frame_for(role: Role, focused: bool) Frame {
+    const lit = focused or role == .command;
+    return .{
+        .rail = if (lit) role.accent() else theme.palette.line,
+        .title_color = if (lit) role.accent() else theme.palette.muted,
+        .ground = theme.palette.panel,
+        .header_ground = role.selection(true),
+    };
+}
+
+pub const Panel = struct {
+    outer: Index,
+    body: Index,
+};
+
+pub fn panel(tree: *Tree, parent: Index, frame: Frame) !Panel {
+    const chrome = frame.chrome;
+    std.debug.assert(chrome.padding_top >= 1);
+    const outer = try node.row(tree, parent, .{
+        .width = frame.width,
+        .height = frame.height,
+        .background = frame.ground,
+    });
+    if (chrome.rail_width > 0) {
+        const rail = try node.box(tree, outer, .{ .width = node.fixed(chrome.rail_width) });
+        const length = if (chrome.rail_height == 0) node.grow else node.fixed(chrome.rail_height);
+        _ = try node.fill(tree, rail, node.grow, length, frame.rail);
+    }
+    const main = try node.box(tree, outer, .{});
+    try header(tree, main, frame);
+    if (chrome.padding_top > 1) {
+        _ = try node.spacer(tree, main, node.grow, node.fixed(chrome.padding_top - 1));
+    }
+    const body = try node.box(tree, main, .{
+        .padding = .{ .left = chrome.padding_left },
+    });
+    std.debug.assert(body > outer);
+    return .{ .outer = outer, .body = body };
+}
+
+pub fn floating(tree: *Tree, rect: Rect, frame: Frame) !Panel {
+    std.debug.assert(tree.len == 0);
+    std.debug.assert(rect.width > 0 and rect.height > 0);
+    const shadow = theme.palette.shadow;
+    const root = try node.box(tree, node.none, .{
+        .width = node.fixed(rect.width + 1),
+        .height = node.fixed(rect.height + 1),
+    });
+    const top = try node.row(tree, root, .{ .height = node.fixed(rect.height) });
+    var placed = frame;
+    placed.width = node.fixed(rect.width);
+    placed.height = node.grow;
+    const result = try panel(tree, top, placed);
+    const side = try node.box(tree, top, .{ .width = node.fixed(1) });
+    _ = try node.spacer(tree, side, node.grow, node.fixed(1));
+    _ = try node.fill(tree, side, node.grow, node.grow, shadow);
+    const bottom = try node.row(tree, root, .{ .height = node.fixed(1) });
+    _ = try node.spacer(tree, bottom, node.fixed(1), node.grow);
+    _ = try node.fill(tree, bottom, node.grow, node.grow, shadow);
+    return result;
+}
+
+fn header(tree: *Tree, parent: Index, frame: Frame) !void {
+    const strip = try node.row(tree, parent, .{
+        .height = node.fixed(1),
+        .padding = .{ .left = frame.chrome.padding_left, .right = 1 },
+        .gap = 1,
+        .background = if (frame.chrome.header_background) frame.header_ground else .{},
+    });
+    _ = try node.label(tree, strip, frame.title, .{ .style = theme.strong(frame.title_color) });
+    if (frame.meta.len == 0 or !meta_fits(frame)) return;
+    _ = try node.label(tree, strip, frame.meta, .{
+        .width = node.fit_at_least(node.columns(frame.meta)),
+        .style = theme.faint(theme.palette.muted),
+    });
+}
+
+fn meta_fits(frame: Frame) bool {
+    const width = switch (frame.width) {
+        .fixed => |cells| cells,
+        else => return true,
+    };
+    const chrome = frame.chrome;
+    const room = width - chrome.rail_width - chrome.padding_left - 1;
+    return node.columns(frame.title) + 1 + node.columns(frame.meta) <= room;
+}
+
+pub const List = struct {
+    role: Role,
+    focused: bool = false,
     empty_text: []const u8 = "No items",
     highlight: []const u8 = "",
-    visual: markix.widgets.ListVisual = tokens.item_list_visual,
-    /// Items in the backing collection, which may exceed the mounted rows.
+    visual: tokens.Visual = tokens.item_list_visual,
     item_count: u16 = 0,
-    /// Index of the first mounted row within the collection.
     scroll: u16 = 0,
     selected: u16 = 0,
 };
 
-/// One row's content. The caller fills these from whatever it is listing.
 pub const Row = struct {
     title: []const u8 = "",
     detail: []const u8 = "",
@@ -79,208 +152,149 @@ pub const Row = struct {
     marker: u8 = ' ',
 };
 
-/// Mounts a pane that fills the box its parent gives it.
-pub fn mount(
-    tree: *dom.DomTree,
-    parent: NodeIndex,
-    rows: u16,
-    visual: markix.widgets.ListVisual,
-) !Slot {
-    var slot = Slot{};
-    slot.panel = try tree.append_child(parent, .{
-        .kind = .panel,
-        .props = .{ .panel = .{ .chrome = tokens.pane_chrome, .style = theme.panel_style } },
-        .layout = try LayoutElement.flex(.column, 0, &.{.{ .fraction = 1 }}),
-    });
-    slot.list = try tree.append_child(slot.panel, .{
-        .kind = .list,
-        .props = .{ .list = .{ .style = theme.panel_style, .visual = visual } },
-        .layout = LayoutElement.leaf(),
-    });
-    slot.mounted = true;
-    try mount_rows(tree, &slot, rows);
-    return slot;
+pub fn capacity(inner: Rect, visual: tokens.Visual) u16 {
+    std.debug.assert(visual.row_height > 0);
+    if (inner.height <= 0) return 0;
+    const rows = @divFloor(inner.height, visual.row_height);
+    return @intCast(@min(rows, rows_max));
 }
 
-/// Mounts a pane at an explicit placement inside a free parent.
-pub fn mount_placed(
-    tree: *dom.DomTree,
-    parent: NodeIndex,
-    placement: Rect,
-    rows: u16,
-    visual: markix.widgets.ListVisual,
-) !Slot {
-    var element = try LayoutElement.flex(.column, 0, &.{.{ .fraction = 1 }});
-    element.placement = .{
-        .x = placement.x,
-        .y = placement.y,
-        .width = placement.width,
-        .height = placement.height,
-    };
-    var slot = Slot{};
-    slot.panel = try tree.append_child(parent, .{
-        .kind = .panel,
-        .props = .{ .panel = .{ .chrome = tokens.pane_chrome, .style = theme.panel_style } },
-        .layout = element,
-    });
-    slot.list = try tree.append_child(slot.panel, .{
-        .kind = .list,
-        .props = .{ .list = .{ .style = theme.panel_style, .visual = visual } },
-        .layout = LayoutElement.leaf(),
-    });
-    slot.mounted = true;
-    try mount_rows(tree, &slot, rows);
-    return slot;
+pub fn empty(tree: *Tree, body: Index, list: List) !void {
+    std.debug.assert(list.item_count == 0);
+    _ = try node.label(tree, body, list.empty_text, .{ .style = theme.ink(theme.palette.muted) });
 }
 
-/// Mounts a bare list with no panel around it, for a surface that already has
-/// its own chrome -- the command centre and the finder.
-pub fn mount_list(
-    tree: *dom.DomTree,
-    parent: NodeIndex,
-    placement: Rect,
-    rows: u16,
-    visual: markix.widgets.ListVisual,
-    style: markix.Style,
-) !Slot {
-    var slot = Slot{};
-    slot.list = try tree.append_child(parent, .{
-        .kind = .list,
-        .props = .{ .list = .{ .style = style, .visual = visual } },
-        .layout = LayoutElement.placed(
-            placement.x,
-            placement.y,
-            placement.width,
-            placement.height,
-        ),
+pub fn item(tree: *Tree, body: Index, list: List, width: i32, value: Row, selected: bool) !void {
+    const visual = list.visual;
+    std.debug.assert(visual.row_height > 0);
+    std.debug.assert(visual.title_column >= 2);
+    const accent = list.role.accent();
+    const ground: Color = if (selected) list.role.selection(list.focused) else .{};
+    const entry = try node.box(tree, body, .{ .height = node.fixed(visual.row_height) });
+    const first = try node.row(tree, entry, .{ .height = node.fixed(1) });
+    const pointer: []const u8 = if (selected) visual.selected_marker else " ";
+    const pointer_color = if (list.focused) accent else theme.palette.muted;
+    _ = try node.label(tree, first, pointer, .{
+        .width = node.fixed(1),
+        .style = theme.ink(pointer_color),
     });
-    slot.mounted = true;
-    try mount_rows(tree, &slot, rows);
-    return slot;
-}
-
-fn mount_rows(tree: *dom.DomTree, slot: *Slot, rows: u16) !void {
-    std.debug.assert(slot.mounted);
-    std.debug.assert(rows <= rows_max);
-    slot.first_row = tree.node_count;
-    var index: u16 = 0;
-    while (index < rows) : (index += 1) {
-        _ = try tree.append_child(slot.list, .{
-            .kind = .list_item,
-            .props = .{ .list_item = .{} },
-            .layout = LayoutElement.leaf(),
+    _ = try node.label(tree, first, marker_text(value.marker), .{
+        .width = node.fixed(visual.title_column - 1),
+        .style = theme.ink(accent),
+    });
+    const title = try node.line(tree, first, .{});
+    const strong = selected or visual.title_bold;
+    try highlighted(tree, title, value.title, list, .{
+        .foreground = if (selected) theme.palette.foreground_strong else theme.palette.foreground,
+        .background = ground,
+        .bold = strong,
+    });
+    const detail_width = detail_columns(width, value.detail, visual.detail_width_divisor);
+    if (detail_width > 0) {
+        _ = try node.spacer(tree, first, node.fixed(1), node.fixed(1));
+        _ = try node.label(tree, first, value.detail, .{
+            .width = node.fixed(detail_width),
+            .style = if (selected)
+                .{ .foreground = accent, .background = ground }
+            else
+                theme.faint(theme.palette.muted),
         });
     }
-    slot.row_count = rows;
+    if (visual.row_height < 2 or value.subtitle.len == 0) return;
+    const second = try node.row(tree, entry, .{ .height = node.fixed(1) });
+    _ = try node.spacer(tree, second, node.fixed(visual.title_column), node.fixed(1));
+    const faint = theme.faint(theme.palette.muted);
+    _ = try node.label(tree, second, value.subtitle, .{ .style = faint });
 }
 
-/// Writes the panel's chrome. Separate from the rows so a surface that owns
-/// its own chrome can update the rows alone.
-pub fn update_frame(tree: *dom.DomTree, slot: *const Slot, config: Config) void {
-    if (!slot.mounted or slot.panel == 0) return;
-    tree.set_focused(slot.panel, config.focused);
-    tree.set_props(slot.panel, .{ .panel = .{
-        .style = config.role.style(config.focused),
-        .chrome = tokens.pane_chrome,
-        .title = config.title,
-        .meta = config.meta,
-    } });
+const markers = blk: {
+    var table: [256][1]u8 = undefined;
+    for (&table, 0..) |*slot, byte| slot.* = .{@intCast(byte)};
+    break :blk table;
+};
+
+fn marker_text(marker: u8) []const u8 {
+    if (!std.ascii.isPrint(marker)) return " ";
+    return &markers[marker];
 }
 
-/// Writes the list's own props. `rows` is the visible window, so the list's
-/// scroll stays at zero and it is the row props that move.
-pub fn update_list(tree: *dom.DomTree, slot: *const Slot, config: Config) void {
-    if (!slot.mounted) return;
-    std.debug.assert(slot.list != 0);
-    std.debug.assert(config.scroll <= config.item_count);
-    std.debug.assert(config.visual.row_height > 0);
-    tree.set_focused(slot.list, config.focused);
-    tree.set_props(slot.list, .{ .list = .{
-        .style = config.role.style(config.focused),
-        .empty_text = config.empty_text,
-        .highlight_query = config.highlight,
-        .match_foreground = if (config.highlight.len > 0) theme.command else null,
-        .visual = config.visual,
-        .item_count = config.item_count,
-        .selected = config.selected -| config.scroll,
-    } });
+fn detail_columns(width: i32, detail: []const u8, divisor: u8) i32 {
+    if (width <= 8 or detail.len == 0 or divisor == 0) return 0;
+    const maximum = @min(@divFloor(width, divisor), width - 5);
+    return @min(node.columns(detail), maximum);
 }
 
-/// Writes one row of the visible window. `window_index` is the row's offset
-/// from the top of the window, not its index in the collection.
-pub fn set_row(
-    tree: *dom.DomTree,
-    slot: *const Slot,
-    window_index: u16,
-    row: ?Row,
-    selected: bool,
-) void {
-    std.debug.assert(window_index < slot.row_count);
-    const node = slot.first_row + window_index;
-    const value = row orelse {
-        tree.set_props(node, .{ .list_item = .{} });
-        return;
-    };
-    tree.set_props(node, .{ .list_item = .{
-        .title = value.title,
-        .detail = value.detail,
-        .subtitle = value.subtitle,
-        .marker = value.marker,
-        .selected = selected,
-    } });
-}
-
-/// Blanks every row past the end of the collection.
-pub fn clear_rows_from(tree: *dom.DomTree, slot: *const Slot, first: u16) void {
-    std.debug.assert(slot.mounted);
-    std.debug.assert(first <= slot.row_count);
-    var row = first;
-    while (row < slot.row_count) : (row += 1) {
-        tree.set_props(slot.first_row + row, .{ .list_item = .{} });
+pub fn highlighted(tree: *Tree, title: Index, text: []const u8, list: List, style: Style) !void {
+    std.debug.assert(title != node.none);
+    var mask: [title_bytes_max]bool = undefined;
+    const usable = text.len <= mask.len and list.highlight.len > 0;
+    if (!usable or !fuzzy.mark_matches(text, list.highlight, &mask)) {
+        return node.run(tree, title, text, style);
+    }
+    var match = style;
+    match.foreground = theme.palette.command;
+    match.underline = true;
+    match.bold = true;
+    std.debug.assert(text.len <= mask.len);
+    var start: usize = 0;
+    while (start < text.len) {
+        const matched = mask[start];
+        var end = start + 1;
+        while (end < text.len and mask[end] == matched) : (end += 1) {}
+        try node.run(tree, title, text[start..end], if (matched) match else style);
+        start = end;
     }
 }
 
 pub fn is_ascii(text: []const u8) bool {
-    std.debug.assert(text.len <= std.math.maxInt(u16));
     for (text) |byte| {
         if (byte >= 0x80) return false;
     }
     return true;
 }
 
-pub fn mark_rows_dirty(tree: *dom.DomTree, slot: *const Slot) void {
-    if (!slot.mounted) return;
-    std.debug.assert(slot.row_count <= rows_max);
-    var row: u16 = 0;
-    while (row < slot.row_count) : (row += 1) {
-        tree.mark_dirty(slot.first_row + row);
-    }
-}
-
-pub fn capture_rects(tree: *dom.DomTree, slot: *Slot) void {
-    if (!slot.mounted) return;
-    std.debug.assert(slot.list != 0);
-    if (slot.panel != 0) {
-        const node = tree.get(slot.panel) orelse return;
-        slot.rect = node.rect();
-    }
-    const list = tree.get(slot.list) orelse return;
-    slot.inner = list.rect();
-}
-
-/// Rows a pane of this size can show, derived from the panel's content box so
-/// it matches what the renderer lays out.
-pub fn visible_rows(rect: Rect, row_height: u8) u16 {
-    if (row_height == 0) return 0;
-    const inner = markix.widgets.panel_content_rect(tokens.pane_chrome, rect);
-    std.debug.assert(inner.height <= rect.height);
-    const rows = @min(@divFloor(inner.height, row_height), rows_max);
-    std.debug.assert(rows <= rows_max);
-    return rows;
-}
+const testing = std.testing;
 
 test "roles map to distinct accents" {
-    try std.testing.expect(!Role.filter.accent().equals(Role.collection.accent()));
-    try std.testing.expect(!Role.collection.accent().equals(Role.document.accent()));
-    try std.testing.expect(!Role.document.accent().equals(Role.command.accent()));
+    try testing.expect(!Role.filter.accent().eql(Role.collection.accent()));
+    try testing.expect(!Role.collection.accent().eql(Role.document.accent()));
+    try testing.expect(!Role.document.accent().eql(Role.command.accent()));
+}
+
+test "a pane puts its body under the header and beside the rail" {
+    var nodes: [32]node.Node = undefined;
+    var tree = Tree.init(&nodes);
+    const frame = try panel(&tree, node.none, .{
+        .title = "FEEDS",
+        .meta = "3 SOURCES",
+        .rail = theme.palette.accent,
+        .title_color = theme.palette.accent,
+        .ground = theme.palette.panel,
+    });
+    node.resolve(&tree, 30, 10);
+    const inner = node.inner_of(&tree, frame.body);
+    const expected = tokens.content_rect(tokens.pane_chrome, Rect.init(0, 0, 30, 10));
+    try testing.expectEqual(expected, inner);
+    try testing.expectEqual(@as(u16, 4), capacity(inner, tokens.item_list_visual));
+}
+
+test "a highlighted title splits into matched and unmatched runs" {
+    var nodes: [16]node.Node = undefined;
+    var tree = Tree.init(&nodes);
+    const root = try node.row(&tree, node.none, .{
+        .width = node.fixed(20),
+        .height = node.fixed(1),
+    });
+    const title = try node.line(&tree, root, .{});
+    try highlighted(&tree, title, "TigerStyle", .{ .role = .filter, .highlight = "tgs" }, .{});
+    try testing.expectEqual(@as(usize, 2 + 6), tree.len);
+    try testing.expectEqualStrings("T", tree.at(2).text);
+    try testing.expect(tree.at(2).style.underline);
+    try testing.expectEqualStrings("i", tree.at(3).text);
+}
+
+test "a detail never takes more than its share of the row" {
+    try testing.expectEqual(@as(i32, 0), detail_columns(8, "12", 3));
+    try testing.expectEqual(@as(i32, 2), detail_columns(40, "12", 3));
+    try testing.expectEqual(@as(i32, 10), detail_columns(30, "2026-11-01 12:00", 3));
 }

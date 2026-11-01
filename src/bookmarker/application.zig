@@ -1,22 +1,22 @@
 const std = @import("std");
-const terminal = @import("markix").terminal;
-const layout = @import("markix").layout;
+const markix = @import("markix");
 const FixedText = @import("data").FixedText;
 
 const bookmarks = @import("data").bookmarks;
 const limits = @import("data").limits;
 const Paths = @import("data").Paths;
 const page = @import("data").page;
-const Rect = layout.Rect;
+const Rect = @import("../ui/geometry.zig").Rect;
 
 const command_center = @import("../ui/command_center.zig");
+const fuzzy = @import("../ui/fuzzy.zig");
 const command_policy = @import("../command.zig");
 
-const SearchInput = terminal.widgets.TextInput(limits.search_bytes_max);
-const TitleInput = terminal.widgets.TextInput(limits.bookmark_title_bytes_max);
-const UrlInput = terminal.widgets.TextInput(limits.bookmark_url_bytes_max);
-const TagsInput = terminal.widgets.TextInput(limits.bookmark_tags_bytes_max);
-const NotesInput = terminal.widgets.TextInput(limits.bookmark_notes_bytes_max);
+const SearchInput = markix.widgets.TextInput(limits.search_bytes_max);
+const TitleInput = markix.widgets.TextInput(limits.bookmark_title_bytes_max);
+const UrlInput = markix.widgets.TextInput(limits.bookmark_url_bytes_max);
+const TagsInput = markix.widgets.TextInput(limits.bookmark_tags_bytes_max);
+const NotesInput = markix.widgets.TextInput(limits.bookmark_notes_bytes_max);
 const Message = FixedText(160);
 const PageUrl = FixedText(limits.bookmark_url_bytes_max);
 pub const Tag = FixedText(limits.tag_name_bytes_max);
@@ -127,8 +127,6 @@ pub const Application = struct {
     field: Field = .url,
     message: Message = .{},
     mouse_layout: MouseLayout = .{},
-    /// Persistent DOM view. Kept across frames so node dirty flags mean
-    /// something: an edited row stays the only node that repaints.
     dom_view: @import("dom_view.zig").View = .{},
 
     pub fn create(
@@ -181,7 +179,7 @@ pub const Application = struct {
         }
     }
 
-    pub fn handle_key(self: *Application, key: layout.input.Key) !bool {
+    pub fn handle_key(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .pointer => |pointer| return self.handle_pointer(pointer),
             else => {},
@@ -197,7 +195,7 @@ pub const Application = struct {
         };
     }
 
-    fn handle_help(self: *Application, key: layout.input.Key) bool {
+    fn handle_help(self: *Application, key: markix.Key) bool {
         switch (key) {
             .escape => self.help_open = false,
             .character => |byte| if (byte == '?' or byte == 'q') {
@@ -211,7 +209,7 @@ pub const Application = struct {
 
     fn handle_pointer(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) !bool {
         if (pointer.action != .press) return true;
         return switch (pointer.button) {
@@ -224,7 +222,7 @@ pub const Application = struct {
 
     fn handle_pointer_primary(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) !bool {
         if (self.click_focus_overlay(pointer)) return true;
         if (self.click_form_field(pointer)) return true;
@@ -241,7 +239,7 @@ pub const Application = struct {
 
     fn click_form_field(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         var index: u8 = 0;
         while (index < self.mouse_layout.field_count) : (index += 1) {
@@ -255,7 +253,7 @@ pub const Application = struct {
 
     fn handle_pointer_wheel(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
         delta: i16,
     ) bool {
         if (region_contains(self.mouse_layout.finder_results, pointer.x, pointer.y)) {
@@ -287,7 +285,7 @@ pub const Application = struct {
 
     fn click_focus_overlay(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         var index: u8 = 0;
         while (index < self.mouse_layout.category_count) : (index += 1) {
@@ -316,7 +314,7 @@ pub const Application = struct {
 
     fn click_command_results(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         const region = self.mouse_layout.command_results orelse return false;
         if (!contains(region.rect, pointer.x, pointer.y)) return false;
@@ -331,7 +329,7 @@ pub const Application = struct {
 
     fn click_scopes(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         const region = self.mouse_layout.scopes orelse return false;
         if (!contains(region.rect, pointer.x, pointer.y)) return false;
@@ -347,7 +345,7 @@ pub const Application = struct {
 
     fn click_bookmarks(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         const region = self.mouse_layout.bookmarks orelse return false;
         if (!contains(region.rect, pointer.x, pointer.y)) return false;
@@ -358,7 +356,7 @@ pub const Application = struct {
 
     fn click_focus_results(
         self: *Application,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) bool {
         const region = self.mouse_layout.focus orelse return false;
         if (!contains(region.rect, pointer.x, pointer.y)) return false;
@@ -369,7 +367,7 @@ pub const Application = struct {
     fn select_pointer_bookmark(
         self: *Application,
         region: MouseListRegion,
-        pointer: layout.input.Pointer,
+        pointer: markix.Pointer,
     ) void {
         const bookmark_index = list_index(region, pointer.x, pointer.y) orelse
             return;
@@ -420,7 +418,7 @@ pub const Application = struct {
         self.preview_scroll = @min(self.preview_scroll, maximum);
     }
 
-    fn handle_browse(self: *Application, key: layout.input.Key) !bool {
+    fn handle_browse(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .character => |byte| switch (byte) {
                 'q' => return false,
@@ -462,7 +460,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_focus(self: *Application, key: layout.input.Key) !bool {
+    fn handle_focus(self: *Application, key: markix.Key) !bool {
         if (self.focus_search_open) return self.handle_focus_search(key);
         switch (key) {
             .escape => try self.leave_focus(),
@@ -500,7 +498,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_focus_search(self: *Application, key: layout.input.Key) !bool {
+    fn handle_focus_search(self: *Application, key: markix.Key) !bool {
         switch (key) {
             .escape => {
                 self.search.clear();
@@ -548,7 +546,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_command(self: *Application, key: layout.input.Key) !bool {
+    fn handle_command(self: *Application, key: markix.Key) !bool {
         switch (try self.command.handle(key, command_policy.bindings)) {
             .quit => return false,
             .close => try self.cancel_command(),
@@ -561,7 +559,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_search(self: *Application, key: layout.input.Key) !bool {
+    fn handle_search(self: *Application, key: markix.Key) !bool {
         if (key == .escape) {
             self.search.clear();
             self.refresh_filter();
@@ -581,7 +579,7 @@ pub const Application = struct {
         return true;
     }
 
-    fn handle_add(self: *Application, key: layout.input.Key) !bool {
+    fn handle_add(self: *Application, key: markix.Key) !bool {
         if (key == .escape) {
             self.mode = .browse;
             try self.set_message("Add cancelled");
@@ -606,7 +604,7 @@ pub const Application = struct {
 
     fn handle_delete_confirmation(
         self: *Application,
-        key: layout.input.Key,
+        key: markix.Key,
     ) !bool {
         if (key == .escape) {
             self.mode = .browse;
@@ -621,8 +619,8 @@ pub const Application = struct {
 
     fn active_input_handle(
         self: *Application,
-        key: layout.input.Key,
-    ) !terminal.widgets.TextInputAction {
+        key: markix.Key,
+    ) !markix.widgets.TextInputAction {
         return switch (self.field) {
             .title => self.title.handle(key),
             .url => self.url.handle(key),
@@ -762,8 +760,6 @@ pub const Application = struct {
             .failure => |err| try self.set_message(@errorName(err)),
             .metadata => |metadata| {
                 bookmark.apply_metadata(&metadata);
-                // Rewrites bookmark text in place, which mounted rows point at.
-                self.dom_view.invalidate();
                 try self.persistence.save(self.io, &self.store);
                 self.refresh_filter();
                 try self.set_message("Page title and content refreshed");
@@ -1292,12 +1288,12 @@ fn bookmark_matches_command(
     bookmark: *const bookmarks.Bookmark,
     query: []const u8,
 ) bool {
-    if (layout.fuzzy.matches(bookmark.title.bytes(), query)) return true;
-    if (layout.fuzzy.matches(bookmark.url.bytes(), query)) return true;
-    if (layout.fuzzy.matches(bookmark.tags.bytes(), query)) return true;
-    if (layout.fuzzy.matches(bookmark.notes.bytes(), query)) return true;
-    if (layout.fuzzy.matches(bookmark.description.bytes(), query)) return true;
-    return layout.fuzzy.matches(bookmark.preview.bytes(), query);
+    if (fuzzy.matches(bookmark.title.bytes(), query)) return true;
+    if (fuzzy.matches(bookmark.url.bytes(), query)) return true;
+    if (fuzzy.matches(bookmark.tags.bytes(), query)) return true;
+    if (fuzzy.matches(bookmark.notes.bytes(), query)) return true;
+    if (fuzzy.matches(bookmark.description.bytes(), query)) return true;
+    return fuzzy.matches(bookmark.preview.bytes(), query);
 }
 
 test "application supports vim navigation and live search" {

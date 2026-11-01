@@ -4,6 +4,8 @@ test {
     _ = @import("import_command.zig");
     _ = @import("reader/application.zig");
     _ = @import("reader/import.zig");
+    _ = @import("reader/xml.zig");
+    _ = @import("reader/document.zig");
     _ = @import("reader/subscriptions.zig");
     _ = @import("reader/view.zig");
     _ = @import("bookmarker/application.zig");
@@ -13,5 +15,4 @@ test {
     _ = @import("keymap.zig");
     _ = @import("command.zig");
     _ = @import("data");
-    _ = @import("web_main.zig");
 }

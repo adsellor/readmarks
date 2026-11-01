@@ -6,7 +6,7 @@ const std = @import("std");
 const markix = @import("markix");
 const command_center = @import("ui/command_center.zig");
 
-const Key = markix.layout.input.Key;
+const Key = markix.Key;
 
 pub const bindings = command_center.Bindings{
     .previous = &.{ .up, .shift_tab },
