@@ -155,7 +155,7 @@ other. `readmarks-bin` installs the release binary instead of compiling, and
 appears once the hashes in `flake.nix` are filled in for a tag:
 
     nix store prefetch-file --hash-type sha256 \
-      https://github.com/adsellor/readmarks/releases/download/v0.2.2/readmarks-linux-x86_64
+      https://github.com/adsellor/readmarks/releases/download/v0.2.3/readmarks-linux-x86_64
 
 ## Home Manager
 
