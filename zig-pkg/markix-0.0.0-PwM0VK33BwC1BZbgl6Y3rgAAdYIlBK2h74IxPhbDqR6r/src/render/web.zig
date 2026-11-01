@@ -70,9 +70,9 @@ pub const Writer = struct {
     pub fn write_rgba(self: *Writer, color: Color) !void {
         const rgba = color_to_rgba(color);
         try self.write_u32(
-            @as(u32, rgba.a) << 24 |
-                @as(u32, rgba.b) << 16 |
-                @as(u32, rgba.g) << 8 |
+            (@as(u32, rgba.a) << 24) |
+                (@as(u32, rgba.b) << 16) |
+                (@as(u32, rgba.g) << 8) |
                 @as(u32, rgba.r),
         );
     }
@@ -514,7 +514,7 @@ test "a frame from a different version is refused rather than misread" {
     });
     var buffer: [256]u8 = undefined;
     const length = try serialize_tree(&tree, &buffer);
-    try std.testing.expect(FrameReader.init(buffer[0..length]) catch null != null);
+    try std.testing.expect((FrameReader.init(buffer[0..length]) catch null) != null);
     std.mem.writeInt(u32, buffer[4..8], dom_version + 1, .little);
     try std.testing.expectError(
         error.FrameVersionMismatch,

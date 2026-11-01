@@ -229,7 +229,7 @@ fn tag_name(tag: []const u8) []const u8 {
     if (tag.len < 2) return "";
     var start: usize = 1;
     if (tag[start] == '/') start += 1;
-    const end = std.mem.indexOfAnyPos(u8, tag, start, " \t\r\n/>") orelse tag.len - 1;
+    const end = std.mem.indexOfAnyPos(u8, tag, start, " \t\r\n/>") orelse (tag.len - 1);
     return tag[start..end];
 }
 

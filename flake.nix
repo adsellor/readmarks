@@ -7,7 +7,7 @@
     zig.url = "github:mitchellh/zig-overlay";
 
     markix = {
-      url = "git+https://codeberg.org/adsellor/markix?rev=36ba0f67c244af46ed668a75f620ab10536f5f3a";
+      url = "git+https://codeberg.org/adsellor/markix?rev=b76cd567812ef979a094ac226fdd2e65b6a35aad";
       flake = false;
     };
 
@@ -31,7 +31,7 @@
 
     systems = builtins.attrNames inputs.zig.packages;
 
-    markix_package = "markix-0.0.0-PwM0VKP3BwCNMue74jTHHG7242QiM1MOvcM9TouqfZiM";
+    markix_package = "markix-0.0.0-PwM0VK33BwC1BZbgl6Y3rgAAdYIlBK2h74IxPhbDqR6r";
 
     # The binaries the ci workflow attaches to a github release, for installing
     # without a toolchain. Fill a hash in when the tag is published:

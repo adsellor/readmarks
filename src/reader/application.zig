@@ -387,7 +387,7 @@ pub const Application = struct {
 
     fn load_cache(self: *Application) !bool {
         self.article_count = 0;
-        const cached_at = self.cache_persistence.load(
+        const cached_at = (self.cache_persistence.load(
             self.io,
             &self.feeds,
             self.feed_count,
@@ -401,7 +401,7 @@ pub const Application = struct {
             self.article_pages.reset();
             if (err == error.InvalidCache) return false;
             return err;
-        } orelse return false;
+        }) orelse return false;
         self.hydrate_cached_articles();
         return cache_module.is_fresh(cached_at, self.io);
     }
