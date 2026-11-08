@@ -16,7 +16,7 @@ pub fn open(io: std.Io, url: []const u8) !void {
         .stderr = .ignore,
     });
     const termination = try child.wait(io);
-    if (!termination.success()) return error.BrowserCommandFailed;
+    if (!termination.eql(.success)) return error.BrowserCommandFailed;
 }
 
 pub fn command_name() []const u8 {

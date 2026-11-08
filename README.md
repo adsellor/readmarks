@@ -16,7 +16,7 @@ Built on [markix](https://codeberg.org/adsellor/markix).
 
 ## Building
 
-Requires Zig 0.17.0-dev (see `minimum_zig_version` in `build.zig.zon`).
+Requires Zig 0.18.0-dev (see `minimum_zig_version` in `build.zig.zon`).
 
     zig build              # build
     zig build run          # build and run
@@ -145,8 +145,13 @@ Clear the quarantine attribute after downloading:
 From a clone:
 
     nix build            # result/bin/readmarks
-    nix develop          # shell with the pinned Zig
+    nix develop          # shell with the latest Zig master
     nix run
+
+Packages and release binaries build with the Zig pinned by the `zig-release`
+input in `flake.nix`, which `nix develop .#release` also gives you. The default
+shell uses the separate `zig` input, which tracks the latest Zig master, so
+development can move ahead of releases.
 
 The flake exposes `default`, which picks Zig's own backend on x86_64 Linux and
 LLVM elsewhere, plus `readmarks-fast` and `readmarks-llvm` to force one or the

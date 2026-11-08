@@ -4,7 +4,17 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+
+    # The Zig of the default dev shell. It tracks the latest Zig master, so
+    # development can move ahead of what releases build with.
     zig.url = "github:mitchellh/zig-overlay";
+
+    # The Zig every package and release binary builds with. Zig master breaks
+    # its API often and flake.lock is not committed, so this names a commit: a
+    # lock refresh here or in a downstream flake cannot change it. Move it by
+    # hand, once `nix develop .#release --command zig build check` passes on
+    # the new commit.
+    zig-release.url = "github:mitchellh/zig-overlay/463ba9945e5f47fb654669c4b1a294ba516cef23";
 
     markix = {
       url = "git+https://codeberg.org/adsellor/markix?rev=b139474d7b1a2f7f77e9613536a53754bdf6e80d";
@@ -29,7 +39,7 @@
       })
     ];
 
-    systems = builtins.attrNames inputs.zig.packages;
+    systems = builtins.attrNames inputs.zig-release.packages;
 
     markix_package = "markix-0.0.0-PwM0VN5IBAAGyxVol4Rnv6Fx_qchzWlq2tlDjtflRPsq";
 
@@ -58,7 +68,8 @@
     flake-utils.lib.eachSystem systems (
       system: let
         pkgs = import nixpkgs {inherit overlays system;};
-        zig = pkgs.zigpkgs.master;
+        zig_dev = pkgs.zigpkgs.master;
+        zig_release = inputs.zig-release.packages.${system}.master;
 
         vendored_packages = pkgs.runCommand "readmarks-zig-packages" {} ''
           mkdir -p "$out/${markix_package}"
@@ -79,7 +90,7 @@
             pname = "readmarks";
             version = "0.3.0";
             src = source;
-            nativeBuildInputs = [zig];
+            nativeBuildInputs = [zig_release];
             dontConfigure = true;
             dontInstall = true;
             buildPhase = ''
@@ -145,7 +156,11 @@
         };
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [zig];
+          nativeBuildInputs = [zig_dev];
+        };
+
+        devShells.release = pkgs.mkShell {
+          nativeBuildInputs = [zig_release];
         };
 
         devShell = self.devShells.${system}.default;

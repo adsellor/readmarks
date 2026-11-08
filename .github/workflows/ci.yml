@@ -14,8 +14,10 @@ jobs:
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: experimental-features = nix-command flakes
+      # The release job needs this one, so it uses the pinned Zig too: a new
+      # Zig master must not be able to block a tag.
       - name: Compile, test and check formatting
-        run: nix develop --command zig build check
+        run: nix develop .#release --command zig build check
 
   release:
     needs: check
@@ -33,7 +35,7 @@ jobs:
       # macOS needs LLVM; the self-hosted backend cannot emit Mach-O yet.
       - name: Cross-compile
         run: |
-          nix develop --command bash -euo pipefail -c '
+          nix develop .#release --command bash -euo pipefail -c '
             mkdir -p dist
             for target in \
               x86_64-linux-musl \

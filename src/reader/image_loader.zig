@@ -245,7 +245,7 @@ fn convert_to_png(loader: *Loader) !void {
         .stderr = .ignore,
     });
     const termination = try child.wait(loader.io);
-    if (!termination.success()) return error.ImageConversionFailed;
+    if (!termination.eql(.success)) return error.ImageConversionFailed;
 }
 
 fn source_path(loader: *Loader) []const u8 {
