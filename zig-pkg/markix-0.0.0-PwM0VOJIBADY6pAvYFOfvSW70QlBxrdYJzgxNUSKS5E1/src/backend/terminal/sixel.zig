@@ -113,7 +113,7 @@ fn ensure_bitmap(
         .stderr = .ignore,
     });
     const termination = try child.wait(io);
-    if (!termination.success()) return error.SixelConversionFailed;
+    if (!termination.eql(.success)) return error.SixelConversionFailed;
     if (!bitmap_matches(io, bitmap_path, width, height)) {
         return error.InvalidSixelBitmap;
     }
