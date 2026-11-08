@@ -48,7 +48,7 @@
     #   nix store prefetch-file --hash-type sha256 <asset url>
     # A system whose hash is still empty exposes no readmarks-bin package.
     release = {
-      version = "0.3.0";
+      version = "0.3.1";
       owner = "adsellor";
       repo = "readmarks";
       assets = {
@@ -88,7 +88,7 @@
         readmarks = {llvm ? false}:
           pkgs.stdenv.mkDerivation {
             pname = "readmarks";
-            version = "0.3.0";
+            version = "0.3.1";
             src = source;
             nativeBuildInputs = [zig_release];
             dontConfigure = true;
